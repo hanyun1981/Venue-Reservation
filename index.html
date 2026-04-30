@@ -504,7 +504,7 @@
             // signInWithPopup 成功後，onAuthStateChanged 會自動觸發 session 恢復。
             // 這裡只需要處理 Canvas 環境模擬登入和登入失敗的情況。
             const handleGoogleLogin = async () => {
-                const ADMIN_EMAIL = 'ptaopenhour@ibsh.tw';
+                const ADMIN_EMAIL = 'hanyun@ibsh.tw';
 
                 if (isCanvasEnv) {
                     const testEmail = prompt(`【預覽環境模擬登入】\n\n請輸入你想模擬驗證的信箱:\n(最高權限管理員請輸入 ${ADMIN_EMAIL})`, ADMIN_EMAIL);
