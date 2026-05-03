@@ -67,11 +67,11 @@
 
     <script type="module">
         import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js';
-        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken, GoogleAuthProvider, signInWithPopup, signOut } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js';
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js';
         import { getFirestore, collection, doc, getDoc, setDoc, deleteDoc, onSnapshot, runTransaction, query, orderBy, limit, serverTimestamp, updateDoc, deleteField, writeBatch } from 'https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js';
 
         window.fbModules = {
-            initializeApp, getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken, GoogleAuthProvider, signInWithPopup, signOut,
+            initializeApp, getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut,
             getFirestore, collection, doc, getDoc, setDoc, deleteDoc, onSnapshot, runTransaction, query, orderBy, limit, serverTimestamp, updateDoc, deleteField, writeBatch
         };
         window.dispatchEvent(new Event('firebaseLoaded'));
@@ -82,6 +82,15 @@
         const { useState, useEffect, useMemo, useCallback } = React;
 
         const isCanvasEnv = typeof __firebase_config !== 'undefined';
+        // 🔧 偵測無法跑 Google OAuth 的環境：
+        //  - file:// 直接開啟（本機雙擊）
+        //  - about:srcdoc（被嵌在 iframe 裡，沒有正確的 origin）
+        //  - data: URL
+        // 這些環境下 Firebase Auth 的 popup / redirect 都會被 OAuth 拒絕（auth/unauthorized-domain），
+        // 所以一律改走「Email 模擬登入」流程。
+        const _proto = (typeof window !== 'undefined' && window.location && window.location.protocol) || '';
+        const isPreviewEnv = ['file:', 'about:', 'data:'].includes(_proto);
+        const useEmailOnlyLogin = isCanvasEnv || isPreviewEnv;
         const defaultFirebaseConfig = {
             apiKey: "AIzaSyAFXr6AfSXf97k2uckNDrH5vXflhO8VD-s",
             authDomain: "venus-reservation.firebaseapp.com",
@@ -111,8 +120,8 @@
         };
 
         const initialUsers = {
-            "bianca@school.edu": { name: "Bianca", email: "bianca@school.edu", defaultClass: "11A", customClass: "", role: "user" },
-            "yvonne@school.edu": { name: "Yvonne", email: "yvonne@school.edu", defaultClass: "11B", customClass: "", role: "user" }
+            "bianca@school.edu": { name: "Bianca", email: "bianca@school.edu", defaultClass: "中學部體育", customClass: "", role: "user" },
+            "yvonne@school.edu": { name: "Yvonne", email: "yvonne@school.edu", defaultClass: "雙語部體育", customClass: "", role: "user" }
         };
 
         // 角色定義
@@ -132,14 +141,24 @@
         const periods = [
             { id: 1, time: "8:10-9:00", name: "Period 1" }, { id: 2, time: "9:10-10:00", name: "Period 2" },
             { id: 3, time: "10:10-11:00", name: "Period 3" }, { id: 4, time: "11:10-12:00", name: "Period 4" },
-            { id: "lunch", time: "12:00-13:00", name: "Lunch Break" },
+            // 午餐時段也開放預約（id 改為一般字串 'L'，讓所有 lunch 特例都不會生效）
+            { id: "L", time: "12:00-13:00", name: "Lunch Time" },
             { id: 5, time: "13:10-14:00", name: "Period 5" }, { id: 6, time: "14:10-15:00", name: "Period 6" },
             { id: 7, time: "15:20-16:10", name: "Period 7" }, { id: 8, time: "16:20-17:10", name: "Period 8" }
         ];
 
         const baseDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-        const classOptions = Array.from({ length: 12 }, (_, i) => [`${i + 1}A`, `${i + 1}B`]).flat();
-        classOptions.push("Other (Specify)");
+        // 預約／登記表單的 Class/Dept 選項（按學校單位）
+        const classOptions = [
+            "中學部體育",
+            "中學部活動",
+            "雙語部體育",
+            "雙語部活動",
+            "國小部體育",
+            "國小部活動",
+            "總務處",
+            "Other (Specify)"
+        ];
 
         const getTimestamp = () => new Date().toLocaleString('en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 
@@ -164,10 +183,14 @@
             const [semesterConfig, setSemesterConfig] = useState({ startDate: '2026-02-23', totalWeeks: 19, maxAdvanceWeeks: 2 });
             const [tempSemesterConfig, setTempSemesterConfig] = useState({ ...semesterConfig });
 
-            const [selectedWeek, setSelectedWeek] = useState(1);
             const [currentRealWeek, setCurrentRealWeek] = useState(1);
             const [allowSaturday, setAllowSaturday] = useState(true);
-            const [hasAutoSetWeek, setHasAutoSetWeek] = useState(false);
+            // 改用「年月日」選擇器：selectedDate 是 source of truth，
+            // selectedWeek / selectedDayIdx 由 selectedDate 推算（見下方 useMemo）
+            const [selectedDate, setSelectedDate] = useState(() => {
+                const t = new Date();
+                return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+            });
             // 一週開放週一到週日（共 7 天），不再使用 Saturday toggle
             const currentDays = baseDays;
 
@@ -181,7 +204,7 @@
             const [authMode, setAuthMode] = useState('login');
             
             const [adminAddUserModal, setAdminAddUserModal] = useState({ isOpen: false });
-            const [addUserForm, setAddUserForm] = useState({ name: '', email: '', classType: '1A', customClass: '', role: 'user' });
+            const [addUserForm, setAddUserForm] = useState({ name: '', email: '', classType: '中學部體育', customClass: '', role: 'user' });
 
             const [bookingModal, setBookingModal] = useState({ isOpen: false, dayIdx: null, periodId: null, existingBooking: null, isEditing: false, isBatch: false, isPast: false });
             const [bookForm, setBookForm] = useState({ classType: '', customClass: '' });
@@ -257,6 +280,14 @@
                         }
                     }
 
+                    // 🔧 處理 signInWithRedirect 回來的結果（fallback 流程用）
+                    // 若沒走過 redirect 流程，這裡會回傳 null，不會出錯。
+                    try {
+                        await fb.getRedirectResult(auth);
+                    } catch (e) {
+                        console.error("Redirect result error:", e);
+                    }
+
                     // 監聽 Auth 狀態：處理頁面重整時的 session 恢復
                     const ADMIN_EMAIL = 'hanyun@ibsh.tw';
                     fb.onAuthStateChanged(auth, async (user) => {
@@ -304,11 +335,17 @@
                     const newCarts = {};
                     snap.forEach(d => { newCarts[d.id] = d.data(); });
 
+                    // 永遠先把 Firestore 拿到的資料寫進 state（不論空不空）
+                    setCartData(newCarts);
+
+                    // 若 Firestore 是空的、且還沒嘗試過種子化，就嘗試寫入預設 3 個場地
                     if (snap.empty && !window.__seededCarts) {
                         window.__seededCarts = true;
-                        Object.entries(initialData).forEach(([k, v]) => dbRefs.fb.setDoc(dbRefs.getDocRef('carts', k), v).catch(e => {}));
-                    } else {
-                        setCartData(newCarts);
+                        Object.entries(initialData).forEach(([k, v]) =>
+                            dbRefs.fb.setDoc(dbRefs.getDocRef('carts', k), v).catch(e => {
+                                console.warn("Seed cart failed (Firestore rules?):", k, e);
+                            })
+                        );
                     }
                 }, err => console.error("Firestore Error:", err));
 
@@ -410,10 +447,12 @@
             // 原本每次 render（包含與預約無關的 UI 操作如開關 modal）都重新跑
             // 排序/過濾/我的預約計算。現在只在依賴資料真正變更時才重算。
             // =================================================================
-            const sortedAllCarts = useMemo(() =>
-                Object.entries(cartData).sort((a, b) => (a[1].order || 0) - (b[1].order || 0)),
-                [cartData]
-            );
+            // 🔧 若 Firestore 沒資料（連不上 / 被 rules 擋 / 尚未種子化）
+            // 就 fallback 用 initialData，確保使用者永遠看得到「活動中心 / 重量訓練室 / 多功能訓練室」三個場地。
+            const sortedAllCarts = useMemo(() => {
+                const source = Object.keys(cartData).length > 0 ? cartData : initialData;
+                return Object.entries(source).sort((a, b) => (a[1].order || 0) - (b[1].order || 0));
+            }, [cartData]);
 
             const filteredCarts = useMemo(() =>
                 sortedAllCarts
@@ -506,24 +545,25 @@
                 }
             };
 
-            // 🔧 FIX [安全]: Google 登入流程
-            // signInWithPopup 成功後，onAuthStateChanged 會自動觸發 session 恢復。
-            // 這裡只需要處理 Canvas 環境模擬登入和登入失敗的情況。
-            const handleGoogleLogin = async () => {
-                const ADMIN_EMAIL = 'hanyun@ibsh.tw';
-
-                if (isCanvasEnv) {
-                    const testEmail = prompt(`【預覽環境模擬登入】\n\n請輸入你想模擬驗證的信箱:\n(最高權限管理員請輸入 ${ADMIN_EMAIL})`, ADMIN_EMAIL);
-                    if (!testEmail) return;
-
-                    if (testEmail.trim() === ADMIN_EMAIL) {
-                        setIsAdmin(true);
-                        setCurrentUser({ name: 'System Admin', email: ADMIN_EMAIL, defaultClass: 'Admin', customClass: '', role: 'super_admin' });
-                        goHome();
-                        return;
-                    }
-
-                    const userDocRef = dbRefs.getDocRef('users', testEmail.trim());
+            // 🔧 共用：以 email 直接登入（不經 Google OAuth）
+            // 用於 Canvas / file:// / about:srcdoc 等無法跑 OAuth 的環境，
+            // 也用於正式環境下「Google 登入失敗」時的備援按鈕。
+            const ADMIN_EMAIL = 'hanyun@ibsh.tw';
+            const loginWithEmail = async (rawEmail) => {
+                if (!rawEmail) return;
+                const email = rawEmail.trim().toLowerCase();
+                if (!email.includes('@')) {
+                    showAlert("請輸入有效的 Email 格式。");
+                    return;
+                }
+                if (email === ADMIN_EMAIL.toLowerCase()) {
+                    setIsAdmin(true);
+                    setCurrentUser({ name: 'System Admin', email: ADMIN_EMAIL, defaultClass: 'Admin', customClass: '', role: 'super_admin' });
+                    goHome();
+                    return;
+                }
+                try {
+                    const userDocRef = dbRefs.getDocRef('users', email);
                     const userDoc = await dbRefs.fb.getDoc(userDocRef);
                     if (userDoc.exists()) {
                         const udata = userDoc.data();
@@ -531,13 +571,33 @@
                         setIsAdmin(udata.role === 'super_admin');
                         goHome();
                     } else {
-                        showAlert(`Access Denied.\nYour account (${testEmail}) is not in the allowed whitelist.`);
+                        showAlert(`Access Denied.\n你的 Email（${email}）不在白名單中。\n請聯絡系統管理員。`);
                     }
-                    return;
+                } catch (err) {
+                    console.error("Email login error:", err);
+                    showAlert("登入失敗，請檢查網路連線後再試。");
+                }
+            };
+
+            // 「Email 登入」按鈕：跳出 prompt 讓使用者輸入 email
+            const handleEmailLogin = async () => {
+                const inputEmail = prompt(`【Email 登入】\n\n請輸入已加入白名單的 Email：\n(最高權限管理員請輸入 ${ADMIN_EMAIL})`, '');
+                if (inputEmail) await loginWithEmail(inputEmail);
+            };
+
+            // 🔧 FIX [安全]: Google 登入流程
+            // signInWithPopup 成功後，onAuthStateChanged 會自動觸發 session 恢復。
+            // 對無法跑 OAuth 的環境（Canvas / file://）改走 email 流程。
+            // 對 popup 失敗的情況自動 fallback 到 redirect，並針對常見錯誤碼給出明確提示。
+            const handleGoogleLogin = async () => {
+                // 環境不支援 OAuth → 直接走 email 流程
+                if (useEmailOnlyLogin) {
+                    return handleEmailLogin();
                 }
 
                 try {
                     const provider = new dbRefs.fb.GoogleAuthProvider();
+                    provider.setCustomParameters({ prompt: 'select_account' });
                     const result = await dbRefs.fb.signInWithPopup(dbRefs.auth, provider);
                     const userEmail = result.user.email;
 
@@ -550,15 +610,52 @@
                             await dbRefs.fb.signOut(dbRefs.auth);
                             setCurrentUser(null);
                             setIsAdmin(false);
-                            showAlert(`Access Denied.\nYour email (${userEmail}) is not registered in the whitelist.\nPlease contact the administrator.`);
+                            showAlert(`Access Denied.\n你的 Email（${userEmail}）不在白名單中。\n請聯絡系統管理員加入後再登入。`);
                         }
                     }
                     // 如果驗證通過，onAuthStateChanged 已經設好 currentUser & isAdmin
                 } catch (error) {
-                    console.error(error);
-                    if (error.code !== 'auth/popup-closed-by-user') {
-                        showAlert(`Google Login Failed: ${error.message}`);
+                    console.error("Google login error:", error);
+                    const code = error?.code || '';
+
+                    if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+                        return; // 使用者主動取消，不顯示錯誤
                     }
+
+                    // popup 被擋 → 自動嘗試 redirect 流程
+                    if (code === 'auth/popup-blocked') {
+                        try {
+                            const provider = new dbRefs.fb.GoogleAuthProvider();
+                            provider.setCustomParameters({ prompt: 'select_account' });
+                            await dbRefs.fb.signInWithRedirect(dbRefs.auth, provider);
+                            return;
+                        } catch (redirectErr) {
+                            console.error("Redirect fallback failed:", redirectErr);
+                        }
+                    }
+
+                    // 針對常見錯誤碼給出明確中文提示
+                    let msg;
+                    switch (code) {
+                        case 'auth/unauthorized-domain':
+                            msg = `❌ 未授權的網域\n\n目前網址（${window.location.origin}）尚未加入 Firebase 允許清單。\n\n修正方式：\n1. 前往 Firebase Console → Authentication → Settings → Authorized domains\n2. 加入此網域\n\n如果你只是要本機測試，請改用下方的「Email 登入」按鈕。`;
+                            break;
+                        case 'auth/operation-not-allowed':
+                            msg = `❌ Google 登入未啟用\n\n請到 Firebase Console → Authentication → Sign-in method 啟用 Google provider。`;
+                            break;
+                        case 'auth/network-request-failed':
+                            msg = `❌ 網路連線失敗\n\n請檢查你的網路後再試。`;
+                            break;
+                        case 'auth/popup-blocked':
+                            msg = `❌ 瀏覽器擋下了 Google 登入彈窗\n\n請允許此網站的彈窗後再試，或改用下方的「Email 登入」。`;
+                            break;
+                        case 'auth/internal-error':
+                            msg = `❌ Firebase 內部錯誤\n\n可能是 Auth 設定不完整。請改用「Email 登入」，或檢查 Firebase Console 設定。`;
+                            break;
+                        default:
+                            msg = `❌ Google 登入失敗\n\n錯誤代碼：${code || 'unknown'}\n${error.message || ''}\n\n如果問題持續，請改用「Email 登入」。`;
+                    }
+                    showAlert(msg);
                 }
             };
 
@@ -580,7 +677,7 @@
                     await dbRefs.fb.setDoc(dbRefs.getDocRef('users', email), newUser);
                     addLog("Add User", "System", `新增使用者：${email}（${ROLE_LABEL[newUser.role] || newUser.role}）`);
                     showAlert("使用者已加入白名單！");
-                    setAddUserForm({ name: '', email: '', classType: '1A', customClass: '', role: 'user' });
+                    setAddUserForm({ name: '', email: '', classType: '中學部體育', customClass: '', role: 'user' });
                     setAdminAddUserModal({ isOpen: false });
                 } catch(err) {
                     console.error(err);
@@ -626,7 +723,6 @@
             };
 
             const getLockForSlot = (cartName, week, dayIdx, periodId) => {
-                if (periodId === 'lunch') return null;
                 return recurringLocks.find(lock =>
                     lock.cartName === cartName &&
                     Number(lock.dayIdx) === Number(dayIdx) &&
@@ -786,8 +882,6 @@
             }, [isAdmin, cartData, currentUser]);
 
             const handleSlotClick = (dayIdx, periodId, existingBooking) => {
-                if (periodId === 'lunch') return;
-
                 const lock = getLockForSlot(selectedCart, selectedWeek, dayIdx, periodId);
                 if (lock) {
                     showAlert(`🔒 此時段已被鎖定\n\n名稱：${lock.name}\n期間：第 ${lock.startWeek} - ${lock.startWeek + lock.weeks - 1} 週`);
@@ -1298,25 +1392,57 @@
                         
                         <div className="w-full max-w-md relative z-10">
                             <div className="text-center mb-8">
-                                <div className="inline-block bg-white p-5 rounded-3xl border-2 border-duo-grayBorder shadow-[0_6px_0_0_#e5e5e5] mb-5">
-                                    <i className="fa-solid fa-graduation-cap text-duo-green text-6xl"></i>
+                                {/* 🏀 運動風 logo：籃球 + 啞鈴雙圖示 */}
+                                <div className="inline-flex items-center justify-center bg-white p-5 rounded-3xl border-2 border-duo-grayBorder shadow-[0_6px_0_0_#e5e5e5] mb-5 gap-3">
+                                    <i className="fa-solid fa-basketball text-duo-yellow text-5xl drop-shadow-sm"></i>
+                                    <i className="fa-solid fa-dumbbell text-duo-green text-5xl drop-shadow-sm"></i>
+                                    <i className="fa-solid fa-person-running text-duo-blue text-5xl drop-shadow-sm"></i>
                                 </div>
                                 <h1 className="text-3xl font-extrabold text-duo-text tracking-tight">室內運動場地登記表</h1>
                                 <p className="text-duo-text/60 font-bold mt-2 text-lg">Indoor Sports Venue Reservation</p>
                             </div>
 
                             <div className="bg-white rounded-[2rem] border-2 border-duo-grayBorder shadow-[0_8px_0_0_#e5e5e5] p-8">
-                                <div className="space-y-6">
+                                <div className="space-y-4">
                                     <div className="text-center">
-                                        <p className="text-sm font-bold text-gray-500 mb-6">Please sign in with your authorized school Google account to continue.</p>
-                                        
+                                        <p className="text-sm font-bold text-gray-500 mb-6">
+                                            {useEmailOnlyLogin
+                                                ? '預覽 / 本機環境，請使用 Email 登入。'
+                                                : '請使用授權的 Google 帳號登入。'}
+                                        </p>
+
+                                        {/* Google 登入按鈕（預覽環境會自動 fallback 為 email prompt） */}
                                         <button onClick={handleGoogleLogin} className="w-full bg-white text-duo-text border-2 border-duo-grayBorder font-extrabold uppercase py-4 rounded-2xl shadow-[0_4px_0_0_#e5e5e5] hover:bg-gray-50 hover:border-gray-300 active:shadow-none active:translate-y-[4px] transition-all tracking-wider text-lg flex items-center justify-center">
                                             <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-6 h-6 mr-3" />
                                             Sign in with Google
                                         </button>
+
+                                        {/* 分隔線 */}
+                                        <div className="flex items-center my-4 gap-3">
+                                            <div className="flex-1 h-[2px] bg-duo-grayBorder"></div>
+                                            <span className="text-xs font-extrabold text-gray-400 uppercase tracking-widest">或</span>
+                                            <div className="flex-1 h-[2px] bg-duo-grayBorder"></div>
+                                        </div>
+
+                                        {/* Email 登入按鈕（永遠可用，方便預覽或 Google OAuth 失敗時使用） */}
+                                        <button onClick={handleEmailLogin} className="w-full bg-duo-blue text-white font-extrabold uppercase py-4 rounded-2xl shadow-[0_4px_0_0_#1899d6] hover:bg-[#1aa0e0] active:shadow-none active:translate-y-[4px] transition-all tracking-wider text-lg flex items-center justify-center">
+                                            <i className="fa-solid fa-envelope mr-3"></i>
+                                            使用 Email 登入
+                                        </button>
+
+                                        {useEmailOnlyLogin && (
+                                            <div className="mt-4 p-3 bg-yellow-50 border-2 border-duo-yellow rounded-xl text-left">
+                                                <p className="text-[11px] font-bold text-duo-yellowDark leading-relaxed">
+                                                    <i className="fa-solid fa-info-circle mr-1"></i>
+                                                    偵測到目前環境為 <span className="font-extrabold">{_proto || 'preview'}</span>，
+                                                    Firebase 的 Google OAuth 在此環境下無法運作。<br/>
+                                                    請使用「Email 登入」直接以白名單帳號登入。
+                                                </p>
+                                            </div>
+                                        )}
                                     </div>
-                                    <div className="text-center mt-4">
-                                        <p className="text-xs font-bold text-gray-400">Admin access is automatically granted for authorized accounts.</p>
+                                    <div className="text-center mt-4 pt-4 border-t-2 border-duo-grayBorder">
+                                        <p className="text-xs font-bold text-gray-400">超級管理員帳號自動授權，其他帳號需先加入白名單。</p>
                                     </div>
                                 </div>
                             </div>
@@ -1546,8 +1672,6 @@
                                                                     </div>
                                                                 </td>
                                                                 {currentDays.map((day, dayIdx) => {
-                                                                    if (period.id === 'lunch') return <td key={dayIdx} className="p-2 align-middle"><div className="bg-gray-50 rounded-2xl h-[72px]"></div></td>;
-                                                                    
                                                                     const slotId = `w${selectedWeek}_d${dayIdx}_p${period.id}`;
                                                                     const myCartsThisSlot = Object.entries(cartData).filter(([cName, cData]) => cData.schedule && cData.schedule[slotId]?.ownerEmail === currentUser.email);
                                                                     
@@ -1586,24 +1710,31 @@
 
                         {currentView === 'home' && (
                             <div className="animate-[fadeIn_0.3s_ease-out]">
-                                {/* === 運動風 Hero Banner === */}
-                                <div className="relative w-full h-56 sm:h-72 md:h-80 mb-8 rounded-[2rem] overflow-hidden border-2 border-duo-grayBorder shadow-duo-card">
+                                {/* === 運動風 Hero Banner（木板地室內運動場） === */}
+                                <div className="relative w-full h-56 sm:h-72 md:h-80 mb-8 rounded-[2rem] overflow-hidden border-2 border-duo-grayBorder shadow-duo-card bg-gradient-to-br from-duo-blue to-duo-green">
                                     <img
-                                        src="https://images.unsplash.com/photo-1574629810360-7efbbe195018?auto=format&fit=crop&w=1600&q=80"
-                                        alt="室內運動場地"
+                                        src="https://images.unsplash.com/photo-1505666287802-931582b5ea8c?auto=format&fit=crop&w=1600&q=80"
+                                        alt="木板地室內運動場地"
                                         className="absolute inset-0 w-full h-full object-cover"
                                         onError={(e) => {
                                             e.target.onerror = null;
-                                            e.target.src = 'https://images.unsplash.com/photo-1546519638-68e109498ffc?auto=format&fit=crop&w=1600&q=80';
+                                            // 第一備援：另一張木地板籃球場
+                                            e.target.src = 'https://images.unsplash.com/photo-1574680096145-d05b474e2155?auto=format&fit=crop&w=1600&q=80';
+                                            e.target.onerror = () => {
+                                                // 第二備援：藏掉 img 用 gradient + icon 撐起 banner
+                                                e.target.style.display = 'none';
+                                            };
                                         }}
                                     />
                                     <div className="absolute inset-0 bg-gradient-to-r from-duo-green/80 via-duo-blue/40 to-transparent"></div>
+                                    {/* 即使圖片失敗，這些大型運動 icon 也會撐起 banner 視覺 */}
+                                    <i className="fa-solid fa-basketball text-white/10 text-[14rem] absolute -bottom-10 -right-10 pointer-events-none rotate-12"></i>
                                     <div className="relative z-10 h-full flex flex-col justify-center p-8 sm:p-12 text-white">
                                         <div className="inline-flex items-center gap-2 mb-3 bg-white/20 backdrop-blur-sm px-4 py-1.5 rounded-full w-fit border border-white/30">
                                             <i className="fa-solid fa-bolt text-duo-yellow"></i>
                                             <span className="text-xs font-extrabold uppercase tracking-widest">Stay Active. Book Your Court.</span>
                                         </div>
-                                        <h1 className="text-3xl sm:text-5xl font-extrabold tracking-tight mb-2 drop-shadow-lg">運動場地登記中心</h1>
+                                        <h1 className="text-3xl sm:text-5xl font-extrabold tracking-tight mb-2 drop-shadow-lg">室內運動場地登記中心</h1>
                                         <p className="text-sm sm:text-lg font-bold text-white/90 max-w-xl drop-shadow leading-relaxed">
                                             <i className="fa-solid fa-basketball mr-2"></i>
                                             <i className="fa-solid fa-dumbbell mr-2"></i>
@@ -1658,7 +1789,8 @@
                                             data.type === '重訓室'
                                                 ? 'https://images.unsplash.com/photo-1534438327276-14e5300c3a48?auto=format&fit=crop&w=800&q=80'
                                             : data.type === '多功能訓練室'
-                                                ? 'https://images.unsplash.com/photo-1571902943202-507ec2618e8f?auto=format&fit=crop&w=800&q=80'
+                                                // TRX 懸吊訓練 / 功能性訓練教室
+                                                ? 'https://images.unsplash.com/photo-1599058917765-a780eda07a3e?auto=format&fit=crop&w=800&q=80'
                                             : data.type === '綜合場地'
                                                 ? 'https://images.unsplash.com/photo-1546519638-68e109498ffc?auto=format&fit=crop&w=800&q=80'
                                             : 'https://images.unsplash.com/photo-1517649763962-0c623066013b?auto=format&fit=crop&w=800&q=80';
@@ -1748,16 +1880,6 @@
                                                         </td>
                                                         
                                                         {currentDays.map((day, dayIdx) => {
-                                                            if (period.id === 'lunch') {
-                                                                return (
-                                                                    <td key={dayIdx} className="p-2 align-middle">
-                                                                        <div className="bg-gray-100 rounded-2xl h-[72px] flex items-center justify-center border-2 border-transparent">
-                                                                            <span className="text-xs font-extrabold text-gray-400 uppercase tracking-widest"><i className="fa-solid fa-utensils mr-2"></i>Lunch</span>
-                                                                        </div>
-                                                                    </td>
-                                                                );
-                                                            }
-                                                            
                                                             const slotId = `w${selectedWeek}_d${dayIdx}_p${period.id}`;
                                                             const bookingInfo = cartData[selectedCart]?.schedule?.[slotId];
                                                             const isMyBooking = bookingInfo && bookingInfo.ownerEmail === currentUser.email;
@@ -2117,10 +2239,6 @@
                     <span className="text-[10px] text-gray-600">{period.time}</span>
                 </td>
                 {currentDays.map((day, dayIdx) => {
-                    if (period.id === 'lunch') {
-                        return <td key={dayIdx} colSpan="3" className="print-lunch font-bold text-center">Not Avaliable for Lunch</td>;
-                    }
-                    
                     const booking = cartData[cartName]?.schedule?.[`w${selectedWeek}_d${dayIdx}_p${period.id}`];
                     const printLock = getLockForSlot(cartName, selectedWeek, dayIdx, period.id);
 
@@ -2145,18 +2263,7 @@
                 })}
             </tr>
 
-            {period.id === 'lunch' && (
-                <tr>
-                    <th className="text-[11px] py-1 bg-[#fafafa]">Period</th>
-                    {currentDays.map(d => (
-                        <React.Fragment key={d + "-sub-afternoon"}>
-                            <th className="text-[11px] py-1 bg-[#fafafa]">Teacher</th>
-                            <th className="text-[11px] py-1 bg-[#fafafa]" style={{ width: '40px' }}>Check-out</th>
-                            <th className="text-[11px] py-1 bg-[#fafafa]" style={{ width: '40px' }}>Return</th>
-                        </React.Fragment>
-                    ))}
-                </tr>
-            )}
+            {/* 午餐節次已開放預約，原本的「下午段重新出現欄位標題」列移除 */}
         </React.Fragment>
     ))}
 </tbody>
