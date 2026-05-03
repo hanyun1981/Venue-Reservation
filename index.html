@@ -105,9 +105,9 @@
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'cartreserver-app';
 
         const initialData = {
-            "活動中心": { type: "綜合場地", location: "活動中心", capacity: 200, schedule: {}, notes: "可進行球類、舞蹈、集會等活動", order: 0, managerEmails: [] },
-            "重量訓練室": { type: "重訓室", location: "體育館", capacity: 20, schedule: {}, notes: "使用前請先閱讀器材安全須知", order: 1, managerEmails: [] },
-            "地下多功能訓練室": { type: "多功能訓練室", location: "地下室", capacity: 30, schedule: {}, order: 2, managerEmails: [] },
+            "活動中心": { type: "綜合場地", location: "活動中心", capacity: 200, schedule: {}, notes: "可進行球類、舞蹈、集會等活動", order: 0, managerEmails: [], registrantEmails: [] },
+            "重量訓練室": { type: "重訓室", location: "體育館", capacity: 20, schedule: {}, notes: "使用前請先閱讀器材安全須知", order: 1, managerEmails: [], registrantEmails: [] },
+            "地下多功能訓練室": { type: "多功能訓練室", location: "地下室", capacity: 30, schedule: {}, order: 2, managerEmails: [], registrantEmails: [] },
         };
 
         const initialUsers = {
@@ -117,13 +117,15 @@
 
         // 角色定義
         const ROLE_OPTIONS = [
-            { value: 'user', label: '一般使用者', color: 'gray', desc: '只能預約場地' },
-            { value: 'venue_manager', label: '場地管理員', color: 'blue', desc: '可審核被指派的場地' },
+            { value: 'user', label: '一般使用者', color: 'gray', desc: '基本帳號' },
+            { value: 'venue_registrant', label: '場地登記者', color: 'green', desc: '可登記/預約被指派的場地' },
+            { value: 'venue_manager', label: '場地審核者', color: 'blue', desc: '可審核被指派的場地' },
             { value: 'super_admin', label: '超級管理員', color: 'yellow', desc: '完整管理權限' }
         ];
         const ROLE_LABEL = {
             'super_admin': '超級管理員',
-            'venue_manager': '場地管理員',
+            'venue_manager': '場地審核者',
+            'venue_registrant': '場地登記者',
             'user': '一般使用者'
         };
 
@@ -135,7 +137,7 @@
             { id: 7, time: "15:20-16:10", name: "Period 7" }, { id: 8, time: "16:20-17:10", name: "Period 8" }
         ];
 
-        const baseDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+        const baseDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
         const classOptions = Array.from({ length: 12 }, (_, i) => [`${i + 1}A`, `${i + 1}B`]).flat();
         classOptions.push("Other (Specify)");
 
@@ -164,9 +166,10 @@
 
             const [selectedWeek, setSelectedWeek] = useState(1);
             const [currentRealWeek, setCurrentRealWeek] = useState(1);
-            const [allowSaturday, setAllowSaturday] = useState(false);
+            const [allowSaturday, setAllowSaturday] = useState(true);
             const [hasAutoSetWeek, setHasAutoSetWeek] = useState(false);
-            const currentDays = allowSaturday ? [...baseDays, "Saturday"] : baseDays;
+            // 一週開放週一到週日（共 7 天），不再使用 Saturday toggle
+            const currentDays = baseDays;
 
             const [cartData, setCartData] = useState({});
             const [usersDB, setUsersDB] = useState({}); 
@@ -184,8 +187,10 @@
             const [bookForm, setBookForm] = useState({ classType: '', customClass: '' });
             const [editBookForm, setEditBookForm] = useState({ name: '', email: '', classType: '', customClass: '' });
             const [editCartModal, setEditCartModal] = useState({ isOpen: false, cartName: null, data: null });
-            // 編輯場地時暫存被選為管理員的 email 陣列
+            // 編輯場地時暫存被選為「場地審核者」的 email 陣列
             const [editCartManagers, setEditCartManagers] = useState([]);
+            // 編輯場地時暫存被選為「場地登記者」的 email 陣列
+            const [editCartRegistrants, setEditCartRegistrants] = useState([]);
             const [printSelection, setPrintSelection] = useState([]);
 
             const [recurringLocks, setRecurringLocks] = useState([]);
@@ -478,7 +483,8 @@
                 if (isNaN(start.getTime())) return "Invalid Date";
                 start.setDate(start.getDate() + (weekNum - 1) * 7);
                 const end = new Date(start);
-                end.setDate(end.getDate() + (includeSat ? 5 : 4)); 
+                // 週一到週日，共 7 天 → 結束日 = 起始日 + 6
+                end.setDate(end.getDate() + 6);
                 return `${start.getMonth() + 1}/${start.getDate()} - ${end.getMonth() + 1}/${end.getDate()}`;
             };
 
@@ -746,20 +752,38 @@
             };
 
             // 寄送審核結果信
-            // 收件者規則：申請人 + 該場地的所有管理員（除了實際審核的那位）
+            // 收件者規則：申請人（場地登記者） + 該場地的所有審核者（包含實際審核的那位）
+            // 依需求：審核通過後，需 email 通知「場地登記者」與「場地審核者」雙方
             const sendReviewResultEmail = async ({ decision, applicantEmail, applicantName, otherManagerEmails, reviewerName, reviewerEmail, cartName, className, week, dayName, periodName, slotDate }) => {
-                const cleanOthers = (otherManagerEmails || []).filter(e => e && e.toLowerCase() !== (reviewerEmail || '').toLowerCase());
+                // 把實際審核者的 email 也納入收件者，並去除重複
+                const allReviewers = [...(otherManagerEmails || []), reviewerEmail].filter(Boolean);
+                const uniqueReviewers = Array.from(new Set(allReviewers.map(e => e.toLowerCase())));
                 await callGAS('sendReviewResult', {
                     decision, // 'approved' | 'rejected'
                     applicantEmail,
                     applicantName,
-                    otherManagerEmails: cleanOthers,
+                    otherManagerEmails: uniqueReviewers,
                     reviewerName: reviewerName || '系統管理員',
                     reviewerEmail: reviewerEmail || '',
                     cartName, className, week, dayName, periodName,
                     slotDate: slotDate || ''
                 });
             };
+
+            // 判斷目前使用者是否可登記此場地
+            // 規則：
+            //  - 超級管理員：永遠可以
+            //  - 場地若未指定 registrantEmails（空陣列）：所有已登入使用者皆可預約（向後相容）
+            //  - 場地若有指定 registrantEmails：必須在名單中
+            const canRegisterCart = useCallback((cartName) => {
+                if (isAdmin) return true;
+                const info = cartData[cartName];
+                if (!info || !currentUser) return false;
+                const list = Array.isArray(info.registrantEmails) ? info.registrantEmails.filter(Boolean) : [];
+                if (list.length === 0) return true;
+                const myEmail = (currentUser.email || '').trim().toLowerCase();
+                return list.some(e => (e || '').trim().toLowerCase() === myEmail);
+            }, [isAdmin, cartData, currentUser]);
 
             const handleSlotClick = (dayIdx, periodId, existingBooking) => {
                 if (periodId === 'lunch') return;
@@ -783,6 +807,12 @@
                 } else {
                     if (isPastSlot && !isAdmin) {
                         showAlert("⚠️ Cannot book slots in the past!");
+                        return;
+                    }
+
+                    // 檢查登記者權限
+                    if (!canRegisterCart(selectedCart)) {
+                        showAlert(`🚫 你不在「${selectedCart}」的場地登記者名單中，無法預約此場地。\n如需預約，請洽系統管理員加入登記者名單。`);
                         return;
                     }
 
@@ -1086,34 +1116,44 @@
                 const oldName = editCartModal.cartName;
                 const newName = formData.get('name').trim();
                 const managerEmails = (editCartManagers || []).filter(Boolean);
+                const registrantEmails = (editCartRegistrants || []).filter(Boolean);
+
+                // 確保「場地登記者」與「場地審核者」是不同的人
+                const overlap = managerEmails.filter(e => registrantEmails.includes(e));
+                if (overlap.length > 0) {
+                    showAlert(`同一人不能同時擔任「場地登記者」與「場地審核者」：\n${overlap.join('、')}\n\n請重新調整。`);
+                    return;
+                }
 
                 try {
                     if (oldName && oldName === newName) {
                         await dbRefs.fb.updateDoc(dbRefs.getDocRef('carts', newName), {
-                            type: formData.get('type'), 
-                            location: formData.get('location'), 
-                            capacity: parseInt(formData.get('capacity')), 
+                            type: formData.get('type'),
+                            location: formData.get('location'),
+                            capacity: parseInt(formData.get('capacity')),
                             notes: formData.get('notes'),
-                            managerEmails
+                            managerEmails,
+                            registrantEmails
                         });
                     } else if (oldName && oldName !== newName) {
                         await dbRefs.fb.runTransaction(dbRefs.db, async (transaction) => {
                             const oldDocRef = dbRefs.getDocRef('carts', oldName);
                             const newDocRef = dbRefs.getDocRef('carts', newName);
                             const oldDoc = await transaction.get(oldDocRef);
-                            
+
                             if (!oldDoc.exists()) throw "CART_NOT_FOUND";
-                            
+
                             const latestData = oldDoc.data();
                             const newData = {
                                 ...latestData,
-                                type: formData.get('type'), 
-                                location: formData.get('location'), 
-                                capacity: parseInt(formData.get('capacity')), 
+                                type: formData.get('type'),
+                                location: formData.get('location'),
+                                capacity: parseInt(formData.get('capacity')),
                                 notes: formData.get('notes'),
-                                managerEmails
+                                managerEmails,
+                                registrantEmails
                             };
-                            
+
                             transaction.set(newDocRef, newData);
                             transaction.delete(oldDocRef);
                         });
@@ -1121,15 +1161,17 @@
                         const newData = {
                             type: formData.get('type'), location: formData.get('location'), capacity: parseInt(formData.get('capacity')), notes: formData.get('notes'),
                             managerEmails,
+                            registrantEmails,
                             schedule: {},
                             order: Object.keys(cartData).length
                         };
                         await dbRefs.fb.setDoc(dbRefs.getDocRef('carts', newName), newData);
                     }
-                    
-                    addLog(oldName ? "Edit Equipment" : "Add Equipment", "System", `Equipment: ${newName}（管理員：${managerEmails.length} 人）`);
+
+                    addLog(oldName ? "Edit Equipment" : "Add Equipment", "System", `Equipment: ${newName}（審核者：${managerEmails.length} 人，登記者：${registrantEmails.length} 人）`);
                     setEditCartModal({ isOpen: false, cartName: null, data: null });
                     setEditCartManagers([]);
+                    setEditCartRegistrants([]);
                 } catch (err) {
                     console.error("Save cart error:", err);
                     if (err === "CART_NOT_FOUND") showAlert("The cart you are trying to edit was not found or was deleted.");
@@ -1335,18 +1377,9 @@
                                         <span className="text-xs font-bold text-duo-red bg-red-50 px-2 py-1 rounded-lg border border-red-200"><i className="fa-solid fa-lock mr-1"></i>Exceeds limit</span>
                                     )}
                                 </div>
-                                {isAdmin && (
-                                    <div className="flex items-center">
-                                        <label className="flex items-center cursor-pointer space-x-3 text-sm font-extrabold text-duo-text/80 uppercase tracking-wider">
-                                            <span>Sat. Booking</span>
-                                            <div className="relative">
-                                                <input type="checkbox" checked={allowSaturday} onChange={handleSaturdayToggle} className="sr-only" />
-                                                <div className={`block w-14 h-8 rounded-full border-2 transition-colors ${allowSaturday ? 'bg-duo-green border-duo-greenDark' : 'bg-duo-grayBorder border-gray-300'}`}></div>
-                                                <div className={`dot absolute left-1 top-1 bg-white w-6 h-6 rounded-full transition-transform ${allowSaturday ? 'transform translate-x-6' : ''}`}></div>
-                                            </div>
-                                        </label>
-                                    </div>
-                                )}
+                                <div className="text-xs font-extrabold text-duo-text/60 uppercase tracking-wider">
+                                    <i className="fa-solid fa-calendar-week mr-1 text-duo-green"></i> 開放預約：週一 - 週日
+                                </div>
                             </div>
                         </div>
                     </header>
@@ -1553,6 +1586,33 @@
 
                         {currentView === 'home' && (
                             <div className="animate-[fadeIn_0.3s_ease-out]">
+                                {/* === 運動風 Hero Banner === */}
+                                <div className="relative w-full h-56 sm:h-72 md:h-80 mb-8 rounded-[2rem] overflow-hidden border-2 border-duo-grayBorder shadow-duo-card">
+                                    <img
+                                        src="https://images.unsplash.com/photo-1574629810360-7efbbe195018?auto=format&fit=crop&w=1600&q=80"
+                                        alt="室內運動場地"
+                                        className="absolute inset-0 w-full h-full object-cover"
+                                        onError={(e) => {
+                                            e.target.onerror = null;
+                                            e.target.src = 'https://images.unsplash.com/photo-1546519638-68e109498ffc?auto=format&fit=crop&w=1600&q=80';
+                                        }}
+                                    />
+                                    <div className="absolute inset-0 bg-gradient-to-r from-duo-green/80 via-duo-blue/40 to-transparent"></div>
+                                    <div className="relative z-10 h-full flex flex-col justify-center p-8 sm:p-12 text-white">
+                                        <div className="inline-flex items-center gap-2 mb-3 bg-white/20 backdrop-blur-sm px-4 py-1.5 rounded-full w-fit border border-white/30">
+                                            <i className="fa-solid fa-bolt text-duo-yellow"></i>
+                                            <span className="text-xs font-extrabold uppercase tracking-widest">Stay Active. Book Your Court.</span>
+                                        </div>
+                                        <h1 className="text-3xl sm:text-5xl font-extrabold tracking-tight mb-2 drop-shadow-lg">運動場地登記中心</h1>
+                                        <p className="text-sm sm:text-lg font-bold text-white/90 max-w-xl drop-shadow leading-relaxed">
+                                            <i className="fa-solid fa-basketball mr-2"></i>
+                                            <i className="fa-solid fa-dumbbell mr-2"></i>
+                                            <i className="fa-solid fa-person-running mr-3"></i>
+                                            訓練、賽事、課堂活動，一站搞定。每週開放 <span className="bg-duo-yellow text-duo-text px-2 py-0.5 rounded-md font-extrabold">週一至週日</span> 預約。
+                                        </p>
+                                    </div>
+                                </div>
+
                                 <div className="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4 border-b-2 border-duo-grayBorder pb-6">
                                     <div className="flex-1">
                                         <h2 className="text-3xl font-extrabold text-duo-text tracking-tight">選擇場地</h2>
@@ -1592,21 +1652,45 @@
                                 </div>
 
                                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                                    {filteredCarts.map(([name, data]) => (
-                                        <div key={name} onClick={() => { setSelectedCart(name); changeView('schedule'); setIsBatchMode(false); setBatchSelection([]); }} className="bg-white rounded-3xl border-2 border-duo-grayBorder shadow-duo-card p-6 hover:-translate-y-1 hover:shadow-[0_8px_0_0_#e5e5e5] active:translate-y-[4px] active:shadow-none cursor-pointer transition-all flex flex-col group">
-                                            <div className="flex justify-between items-start mb-4">
-                                                {getIcon(data.type)}
-                                                <span className="bg-duo-grayLight text-gray-500 text-xs px-3 py-1.5 rounded-xl font-extrabold border-2 border-duo-grayBorder uppercase tracking-wider">{data.capacity} 人</span>
+                                    {filteredCarts.map(([name, data]) => {
+                                        // 依場地類型挑選對應運動圖片
+                                        const cartImage =
+                                            data.type === '重訓室'
+                                                ? 'https://images.unsplash.com/photo-1534438327276-14e5300c3a48?auto=format&fit=crop&w=800&q=80'
+                                            : data.type === '多功能訓練室'
+                                                ? 'https://images.unsplash.com/photo-1571902943202-507ec2618e8f?auto=format&fit=crop&w=800&q=80'
+                                            : data.type === '綜合場地'
+                                                ? 'https://images.unsplash.com/photo-1546519638-68e109498ffc?auto=format&fit=crop&w=800&q=80'
+                                            : 'https://images.unsplash.com/photo-1517649763962-0c623066013b?auto=format&fit=crop&w=800&q=80';
+                                        return (
+                                        <div key={name} onClick={() => { setSelectedCart(name); changeView('schedule'); setIsBatchMode(false); setBatchSelection([]); }} className="bg-white rounded-3xl border-2 border-duo-grayBorder shadow-duo-card overflow-hidden hover:-translate-y-1 hover:shadow-[0_8px_0_0_#e5e5e5] active:translate-y-[4px] active:shadow-none cursor-pointer transition-all flex flex-col group">
+                                            {/* 場地圖片 */}
+                                            <div className="relative w-full h-40 overflow-hidden">
+                                                <img
+                                                    src={cartImage}
+                                                    alt={name}
+                                                    className="absolute inset-0 w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                                                    onError={(e) => { e.target.onerror = null; e.target.src = 'https://images.unsplash.com/photo-1517649763962-0c623066013b?auto=format&fit=crop&w=800&q=80'; }}
+                                                />
+                                                <div className="absolute inset-0 bg-gradient-to-t from-black/40 via-transparent to-transparent"></div>
+                                                <span className="absolute top-3 right-3 bg-white/90 backdrop-blur text-duo-text text-xs px-3 py-1.5 rounded-xl font-extrabold border-2 border-white uppercase tracking-wider shadow-md">{data.capacity} 人</span>
+                                                <span className="absolute bottom-3 left-3 bg-white/90 backdrop-blur text-duo-blue text-[11px] px-3 py-1 rounded-lg font-extrabold border-2 border-white uppercase tracking-wider shadow-md">{data.type}</span>
                                             </div>
-                                            <h3 className="text-2xl font-extrabold text-duo-text mb-2 group-hover:text-duo-blue transition-colors">{name}</h3>
-                                            <div className="flex items-center text-sm font-bold text-gray-400 mb-4"><i className="fa-solid fa-location-dot mr-2"></i> {data.location}</div>
-                                            {data.notes && (
-                                                <div className="mt-auto flex items-start text-xs text-duo-red bg-red-50 p-3 rounded-xl border-2 border-red-100 font-bold">
-                                                    <i className="fa-solid fa-circle-exclamation mt-0.5 mr-2"></i><span>{data.notes}</span>
+                                            <div className="p-6 flex flex-col flex-1">
+                                                <div className="flex items-center gap-3 mb-2">
+                                                    {getIcon(data.type)}
+                                                    <h3 className="text-2xl font-extrabold text-duo-text group-hover:text-duo-blue transition-colors leading-tight">{name}</h3>
                                                 </div>
-                                            )}
+                                                <div className="flex items-center text-sm font-bold text-gray-400 mb-4"><i className="fa-solid fa-location-dot mr-2"></i> {data.location}</div>
+                                                {data.notes && (
+                                                    <div className="mt-auto flex items-start text-xs text-duo-red bg-red-50 p-3 rounded-xl border-2 border-red-100 font-bold">
+                                                        <i className="fa-solid fa-circle-exclamation mt-0.5 mr-2"></i><span>{data.notes}</span>
+                                                    </div>
+                                                )}
+                                            </div>
                                         </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             </div>
                         )}
@@ -1766,7 +1850,7 @@
                                             <div>
                                                 <div className="flex flex-wrap justify-between items-center mb-6 gap-4 border-b-2 border-duo-grayBorder pb-4">
                                                     <h3 className="text-2xl font-extrabold text-duo-text">場地列表</h3>
-                                                    <button onClick={() => { setEditCartModal({ isOpen: true, cartName: null, data: { type: '綜合場地', capacity: 30, location: '', notes: '' } }); setEditCartManagers([]); }} className="px-5 py-3 bg-duo-green text-white font-extrabold uppercase tracking-wider text-sm rounded-2xl shadow-duo-green active:shadow-none active:translate-y-[4px] transition-all"><i className="fa-solid fa-plus mr-2"></i> 新增場地</button>
+                                                    <button onClick={() => { setEditCartModal({ isOpen: true, cartName: null, data: { type: '綜合場地', capacity: 30, location: '', notes: '' } }); setEditCartManagers([]); setEditCartRegistrants([]); }} className="px-5 py-3 bg-duo-green text-white font-extrabold uppercase tracking-wider text-sm rounded-2xl shadow-duo-green active:shadow-none active:translate-y-[4px] transition-all"><i className="fa-solid fa-plus mr-2"></i> 新增場地</button>
                                                 </div>
                                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                                     {sortedAllCarts.map(([name, data], index) => (
@@ -1780,19 +1864,28 @@
                                                                 <div className="truncate">
                                                                     <div className="font-extrabold text-lg text-duo-text leading-none truncate">{name}</div>
                                                                     <div className="text-sm font-bold text-gray-400 mt-1 truncate">{data.capacity} 人 • {data.location}</div>
+                                                                    {Array.isArray(data.registrantEmails) && data.registrantEmails.length > 0 ? (
+                                                                        <div className="text-[11px] font-bold text-duo-greenDark mt-1 truncate">
+                                                                            <i className="fa-solid fa-user-pen mr-1"></i>
+                                                                            登記者 {data.registrantEmails.length} 人：
+                                                                            {data.registrantEmails.map(em => usersDB[em]?.name || em).join('、')}
+                                                                        </div>
+                                                                    ) : (
+                                                                        <div className="text-[11px] font-bold text-gray-300 mt-1 truncate"><i className="fa-solid fa-circle-info mr-1"></i>無指定登記者（任何人皆可預約）</div>
+                                                                    )}
                                                                     {Array.isArray(data.managerEmails) && data.managerEmails.length > 0 ? (
-                                                                        <div className="text-[11px] font-bold text-duo-blue mt-1 truncate">
+                                                                        <div className="text-[11px] font-bold text-duo-blue mt-0.5 truncate">
                                                                             <i className="fa-solid fa-user-shield mr-1"></i>
-                                                                            管理員 {data.managerEmails.length} 人：
+                                                                            審核者 {data.managerEmails.length} 人：
                                                                             {data.managerEmails.map(em => usersDB[em]?.name || em).join('、')}
                                                                         </div>
                                                                     ) : (
-                                                                        <div className="text-[11px] font-bold text-gray-300 mt-1 truncate"><i className="fa-solid fa-circle-info mr-1"></i>無管理員（不需審核）</div>
+                                                                        <div className="text-[11px] font-bold text-gray-300 mt-0.5 truncate"><i className="fa-solid fa-circle-info mr-1"></i>無審核者（不需審核）</div>
                                                                     )}
                                                                 </div>
                                                             </div>
                                                             <div className="flex gap-2 ml-2 shrink-0">
-                                                                <button onClick={() => { setEditCartModal({ isOpen: true, cartName: name, data: data }); setEditCartManagers(Array.isArray(data.managerEmails) ? [...data.managerEmails] : []); }} className="w-10 h-10 bg-white border-2 border-duo-grayBorder text-duo-blue rounded-xl shadow-duo-gray active:shadow-none active:translate-y-[4px] flex items-center justify-center transition-all" title="Edit"><i className="fa-solid fa-pen"></i></button>
+                                                                <button onClick={() => { setEditCartModal({ isOpen: true, cartName: name, data: data }); setEditCartManagers(Array.isArray(data.managerEmails) ? [...data.managerEmails] : []); setEditCartRegistrants(Array.isArray(data.registrantEmails) ? [...data.registrantEmails] : []); }} className="w-10 h-10 bg-white border-2 border-duo-grayBorder text-duo-blue rounded-xl shadow-duo-gray active:shadow-none active:translate-y-[4px] flex items-center justify-center transition-all" title="Edit"><i className="fa-solid fa-pen"></i></button>
                                                                 <button onClick={() => deleteCart(name)} className="w-10 h-10 bg-white border-2 border-duo-grayBorder text-duo-red rounded-xl shadow-duo-gray active:shadow-none active:translate-y-[4px] flex items-center justify-center transition-all" title="Delete"><i className="fa-solid fa-trash"></i></button>
                                                             </div>
                                                         </div>
@@ -2237,18 +2330,68 @@
                                         <div><label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">容納人數</label><input required type="number" name="capacity" defaultValue={editCartModal.data?.capacity || 30} min="1" className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold" /></div>
                                     </div>
                                     <div><label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">位置</label><input required name="location" defaultValue={editCartModal.data?.location || ''} placeholder="例如：體育館 / 地下室" className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold" /></div>
+                                    {/* === 場地登記者 === */}
                                     <div>
                                         <label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">
-                                            <i className="fa-solid fa-user-shield mr-1 text-duo-blue"></i>場地管理員（可複選）
+                                            <i className="fa-solid fa-user-pen mr-1 text-duo-green"></i>場地登記者（可複選）
                                         </label>
-                                        {/* 已選清單 */}
+                                        {editCartRegistrants.length > 0 && (
+                                            <div className="flex flex-wrap gap-2 mb-2 p-3 bg-green-50 border-2 border-green-100 rounded-xl">
+                                                {editCartRegistrants.map(em => {
+                                                    const u = usersDB[em];
+                                                    return (
+                                                        <span key={em} className="inline-flex items-center bg-white border-2 border-duo-green text-duo-greenDark text-xs font-extrabold px-3 py-1.5 rounded-full">
+                                                            <i className="fa-solid fa-user-pen mr-1.5"></i>
+                                                            {u ? u.name : em}
+                                                            <button type="button" onClick={() => setEditCartRegistrants(prev => prev.filter(e => e !== em))} className="ml-2 w-4 h-4 rounded-full bg-duo-red text-white flex items-center justify-center text-[10px] hover:bg-duo-redDark">
+                                                                <i className="fa-solid fa-times"></i>
+                                                            </button>
+                                                        </span>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                        <select
+                                            value=""
+                                            onChange={(e) => {
+                                                const val = e.target.value;
+                                                if (val && !editCartRegistrants.includes(val)) {
+                                                    setEditCartRegistrants(prev => [...prev, val]);
+                                                }
+                                                e.target.value = '';
+                                            }}
+                                            className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-green outline-none font-bold cursor-pointer"
+                                        >
+                                            <option value="">＋ 從名單挑選一位登記者加入</option>
+                                            {Object.values(usersDB)
+                                                .filter(u => !editCartRegistrants.includes(u.email))
+                                                .filter(u => !editCartManagers.includes(u.email))
+                                                .filter(u => u.role === 'venue_registrant' || u.role === 'super_admin')
+                                                .map(u => (
+                                                    <option key={u.email} value={u.email}>
+                                                        {u.name} ({u.email}) — {ROLE_LABEL[u.role] || u.role}
+                                                    </option>
+                                                ))}
+                                        </select>
+                                        <p className="text-[11px] font-bold text-gray-400 mt-1.5 leading-snug">
+                                            未選 = 任何已登入者都可預約此場地。<br/>
+                                            選擇後，僅指定的登記者可預約此場地。<br/>
+                                            <span className="text-duo-greenDark">ℹ️ 名單只列出角色為「場地登記者」或「超級管理員」的使用者。</span>
+                                        </p>
+                                    </div>
+
+                                    {/* === 場地審核者 === */}
+                                    <div>
+                                        <label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">
+                                            <i className="fa-solid fa-user-shield mr-1 text-duo-blue"></i>場地審核者（可複選，需與登記者不同人）
+                                        </label>
                                         {editCartManagers.length > 0 && (
                                             <div className="flex flex-wrap gap-2 mb-2 p-3 bg-blue-50 border-2 border-blue-100 rounded-xl">
                                                 {editCartManagers.map(em => {
                                                     const u = usersDB[em];
                                                     return (
                                                         <span key={em} className="inline-flex items-center bg-white border-2 border-duo-blue text-duo-blue text-xs font-extrabold px-3 py-1.5 rounded-full">
-                                                            <i className="fa-solid fa-user mr-1.5"></i>
+                                                            <i className="fa-solid fa-user-shield mr-1.5"></i>
                                                             {u ? u.name : em}
                                                             <button type="button" onClick={() => setEditCartManagers(prev => prev.filter(e => e !== em))} className="ml-2 w-4 h-4 rounded-full bg-duo-red text-white flex items-center justify-center text-[10px] hover:bg-duo-redDark">
                                                                 <i className="fa-solid fa-times"></i>
@@ -2258,7 +2401,6 @@
                                                 })}
                                             </div>
                                         )}
-                                        {/* 可選清單（從白名單挑，且尚未被選） */}
                                         <select
                                             value=""
                                             onChange={(e) => {
@@ -2270,9 +2412,10 @@
                                             }}
                                             className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold cursor-pointer"
                                         >
-                                            <option value="">＋ 從名單挑選一位管理員加入</option>
+                                            <option value="">＋ 從名單挑選一位審核者加入</option>
                                             {Object.values(usersDB)
                                                 .filter(u => !editCartManagers.includes(u.email))
+                                                .filter(u => !editCartRegistrants.includes(u.email))
                                                 .filter(u => u.role === 'venue_manager' || u.role === 'super_admin')
                                                 .map(u => (
                                                     <option key={u.email} value={u.email}>
@@ -2282,13 +2425,13 @@
                                         </select>
                                         <p className="text-[11px] font-bold text-gray-400 mt-1.5 leading-snug">
                                             未選 = 預約不需審核，直接通過。<br/>
-                                            選擇後，預約申請會自動寄信通知所有管理員，任一人核准即可。<br/>
-                                            <span className="text-duo-yellowDark">ℹ️ 名單只列出角色為「場地管理員」或「超級管理員」的使用者。請先到 Users 設定角色。</span>
+                                            選擇後，預約申請會自動寄信通知所有審核者，任一人核准即可；通過後會 email 通知登記者與審核者。<br/>
+                                            <span className="text-duo-yellowDark">ℹ️ 名單只列出角色為「場地審核者」或「超級管理員」，且未在登記者名單中的使用者。</span>
                                         </p>
                                     </div>
                                     <div><label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">備註 (選填)</label><textarea name="notes" defaultValue={editCartModal.data?.notes || ''} placeholder="例如：使用前請閱讀器材安全須知" rows="2" className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold resize-none" /></div>
                                     <div className="flex gap-4 pt-4 border-t-2 border-duo-grayBorder">
-                                        <button type="button" onClick={() => { setEditCartModal({ isOpen: false, cartName: null, data: null }); setEditCartManagers([]); }} className="flex-1 bg-white border-2 border-duo-grayBorder text-gray-400 font-extrabold uppercase py-3 rounded-2xl shadow-duo-gray active:shadow-none active:translate-y-[4px] transition-all">取消</button>
+                                        <button type="button" onClick={() => { setEditCartModal({ isOpen: false, cartName: null, data: null }); setEditCartManagers([]); setEditCartRegistrants([]); }} className="flex-1 bg-white border-2 border-duo-grayBorder text-gray-400 font-extrabold uppercase py-3 rounded-2xl shadow-duo-gray active:shadow-none active:translate-y-[4px] transition-all">取消</button>
                                         <button type="submit" className="flex-[2] bg-duo-green text-white font-extrabold uppercase py-3 rounded-2xl shadow-duo-green active:shadow-none active:translate-y-[4px] transition-all">儲存</button>
                                     </div>
                                 </form>
