@@ -104,10 +104,12 @@
         // 🔧 Google Apps Script 設定
         // 部署 GAS Web App 後，請填入下方兩個欄位：
         // 1. WEB_APP_URL - 部署後拿到的 https://script.google.com/macros/s/.../exec 連結
-        // 2. API_SECRET  - 必須與 GAS 程式碼中的 CONFIG.API_SECRET 完全一致
+        // 2. APP_URL     - index.html 對外公開的網址；email 一鍵審核按鈕會連到這裡
+        // 3. API_SECRET  - 必須與 GAS 程式碼中的 CONFIG.API_SECRET 完全一致
         const GAS_CONFIG = {
-            WEB_APP_URL: 'YOUR_WEB_APP_URL',
-            API_SECRET: 'YOUR_API_SECRET'
+            WEB_APP_URL: 'https://script.google.com/macros/s/AKfycbw_jcUo1ARQwfXDu4sg3beyqTaDIeT3PEBYRkt_QHUVpXUgunVrCZy6zXciNLPGCv0uBA/exec',
+            APP_URL: 'https://venus-reservation.web.app',
+            API_SECRET: 'sport-venue-2026-XYZabc!@#'
         };
 
         const firebaseConfig = isCanvasEnv ? JSON.parse(__firebase_config) : defaultFirebaseConfig;
@@ -819,14 +821,17 @@
             const currentRealDayIdx = todayDay === 0 ? 6 : todayDay - 1;
 
             // 🔧 通用 GAS Web App 呼叫函式
-            // 所有寄信功能都走這個。失敗時只在 console 顯示錯誤，不阻擋使用者操作。
+            // 所有寄信功能都走這個。
+            // showErrors=true 時若失敗會跳 alert 視窗（測試用、後台動作用 false 才不會打斷使用者）。
             //
             // ⚠️ GAS Web App 的 fetch 必須用 'text/plain' Content-Type 才能跳過 CORS preflight。
             // GAS 端會自己 parse JSON。
-            const callGAS = useCallback(async (action, extraData) => {
-                if (GAS_CONFIG.WEB_APP_URL === 'YOUR_WEB_APP_URL') {
-                    console.warn("Google Apps Script not configured. Skipping action:", action);
-                    return null;
+            const callGAS = useCallback(async (action, extraData, showErrors = false) => {
+                if (!GAS_CONFIG.WEB_APP_URL || GAS_CONFIG.WEB_APP_URL === 'YOUR_WEB_APP_URL') {
+                    const msg = "GAS Web App URL 未設定，跳過寄信。";
+                    console.warn(msg, action);
+                    if (showErrors) showAlert(`📧 ${msg}`);
+                    return { ok: false, error: msg };
                 }
                 const payload = {
                     secret: GAS_CONFIG.API_SECRET,
@@ -840,41 +845,87 @@
                         body: JSON.stringify(payload),
                         redirect: 'follow'
                     });
-                    const result = await res.json();
-                    if (!result.ok) console.error(`GAS [${action}] error:`, result.error);
+                    const text = await res.text();
+
+                    // GAS 失敗時可能回傳 HTML（例如未授權、未公開、被擋），先嘗試解析 JSON
+                    let result;
+                    try {
+                        result = JSON.parse(text);
+                    } catch (parseErr) {
+                        console.error(`GAS [${action}] returned non-JSON:`, text.slice(0, 800));
+                        const reason = text.includes('Authorization')
+                            ? '⚠️ GAS 尚未授權使用 Gmail。請到 GAS 編輯器執行一次 sendTestEmail() 完成授權。'
+                            : text.includes('Sign in')
+                                ? '⚠️ Web App 部署的「存取權」沒設成「任何人」，請重新部署並選「任何人」。'
+                                : `⚠️ GAS 回應不是 JSON，可能是 Web App 設定錯誤或部署失敗。\n\n回應前 200 字：\n${text.slice(0, 200)}`;
+                        if (showErrors) showAlert(`📧 寄信失敗\n\n${reason}`);
+                        return { ok: false, error: reason };
+                    }
+
+                    if (!result.ok) {
+                        console.error(`GAS [${action}] error:`, result.error);
+                        if (showErrors) showAlert(`📧 寄信失敗（GAS 回報）：${result.error || '未知錯誤'}`);
+                    }
                     return result;
                 } catch (err) {
+                    const msg = `📧 寄信失敗：無法連線到 GAS Web App\n\n${err.message || err}\n\n請確認：\n• WEB_APP_URL 是否正確（要以 /exec 結尾）\n• GAS 部署的「存取權」是否設成「任何人」\n• 部署後是否「儲存新版本」`;
                     console.error(`GAS [${action}] fetch failed:`, err);
-                    return null;
+                    if (showErrors) showAlert(msg);
+                    return { ok: false, error: String(err) };
                 }
-            }, []);
+            }, [showAlert]);
+
+            // 🔧 連線測試：呼叫 GAS 的 ping 端點與 sendTestEmail 端點
+            const handleTestEmailConnection = async () => {
+                showAlert("正在測試 GAS 連線...");
+                // 1. ping 測試（不寄信，只確認連線與 secret 正確）
+                const pingResult = await callGAS('ping', {}, true);
+                if (!pingResult || !pingResult.ok) return;
+
+                // 2. 真的寄一封測試信給目前登入者
+                showConfirm(
+                    `✅ GAS 連線成功！\n\n要寄一封測試信給你 (${currentUser.email}) 嗎？`,
+                    async () => {
+                        const sendResult = await callGAS('sendTestEmail', { to: currentUser.email }, true);
+                        if (sendResult && sendResult.ok) {
+                            showAlert(`✅ 測試信已送出！\n\n收件者：${currentUser.email}\n請到 Gmail 收件匣確認（也可能在垃圾信件夾）。`);
+                        }
+                    }
+                );
+            };
 
             // 寄送審核通知信給場地管理員（一個或多個）
-            const sendApprovalEmail = async ({ managerEmails, cartName, applicantName, applicantEmail, className, week, dayName, periodName, slotCount, slotDate }) => {
+            // slots: [{ slotId, week, dayName, periodName, slotDate }]
+            // GAS 會根據 slotId 為每筆預約生成「核准 / 退回」一鍵按鈕的 URL
+            const getAppBaseLink = () => {
+                const configuredUrl = (GAS_CONFIG.APP_URL || '').trim();
+                if (configuredUrl) return configuredUrl.split('?')[0].replace(/\/+$/,'');
+                return `${window.location.origin}${window.location.pathname}`;
+            };
+
+            const sendApprovalEmail = async ({ managerEmails, cartName, applicantName, applicantEmail, className, slots }) => {
                 const emails = (managerEmails || []).filter(Boolean);
                 if (emails.length === 0) return;
-                const approveLink = window.location.origin + window.location.pathname;
+                const baseLink = getAppBaseLink();
                 await callGAS('sendApprovalNotification', {
                     managerEmails: emails,
                     cartName, applicantName, applicantEmail, className,
-                    week, dayName, periodName,
-                    slotDate: slotDate || '',
-                    slotCount: slotCount || 1,
-                    approveLink
+                    slots: slots || [],
+                    baseLink
                 });
             };
 
             // 寄送審核結果信
-            // 收件者規則：申請人（場地登記者） + 該場地的所有審核者（包含實際審核的那位）
-            // 依需求：審核通過後，需 email 通知「場地登記者」與「場地審核者」雙方
-            const sendReviewResultEmail = async ({ decision, applicantEmail, applicantName, otherManagerEmails, reviewerName, reviewerEmail, cartName, className, week, dayName, periodName, slotDate }) => {
-                // 把實際審核者的 email 也納入收件者，並去除重複
+            // 收件者規則：申請人 + 該場地所有可登記者 + 該場地所有審核者（包含實際審核的那位）
+            const sendReviewResultEmail = async ({ decision, applicantEmail, applicantName, registrantEmails, otherManagerEmails, reviewerName, reviewerEmail, cartName, className, week, dayName, periodName, slotDate }) => {
+                const uniqueRegistrants = Array.from(new Set((registrantEmails || []).filter(Boolean).map(e => e.toLowerCase())));
                 const allReviewers = [...(otherManagerEmails || []), reviewerEmail].filter(Boolean);
                 const uniqueReviewers = Array.from(new Set(allReviewers.map(e => e.toLowerCase())));
                 await callGAS('sendReviewResult', {
                     decision, // 'approved' | 'rejected'
                     applicantEmail,
                     applicantName,
+                    registrantEmails: uniqueRegistrants,
                     otherManagerEmails: uniqueReviewers,
                     reviewerName: reviewerName || '系統管理員',
                     reviewerEmail: reviewerEmail || '',
@@ -986,22 +1037,26 @@
                     setIsBatchMode(false);
 
                     // 🔧 寄信通知所有管理員（只在 pending 時寄）
+                    // 每筆 slot 各自附「核准 / 退回」一鍵按鈕，由 GAS 端的 buildActionUrl() 生成連結
                     if (needsApproval) {
-                        const firstSlot = slotsToBook[0];
-                        const periodInfo = periods.find(p => String(p.id) === String(firstSlot.periodId));
                         sendApprovalEmail({
                             managerEmails,
                             cartName: selectedCart,
                             applicantName: currentUser.name,
                             applicantEmail: currentUser.email,
                             className: finalClass,
-                            week: selectedWeek,
-                            dayName: currentDays[firstSlot.dayIdx],
-                            periodName: periodInfo ? periodInfo.name : `Period ${firstSlot.periodId}`,
-                            slotDate: getDateForDayIdx(selectedWeek, firstSlot.dayIdx),
-                            slotCount: slotsToBook.length
+                            slots: slotsToBook.map(slot => {
+                                const pinfo = periods.find(p => String(p.id) === String(slot.periodId));
+                                return {
+                                    slotId: slot.slotId,
+                                    week: selectedWeek,
+                                    dayName: currentDays[slot.dayIdx],
+                                    periodName: pinfo ? pinfo.name : `Period ${slot.periodId}`,
+                                    slotDate: getDateForDayIdx(selectedWeek, slot.dayIdx)
+                                };
+                            })
                         });
-                        showAlert(`✅ 預約已送出！\n\n您的申請正在等待場地管理員審核。\n審核結果將反映在「My Bookings」頁面。`);
+                        showAlert(`✅ 預約已送出！\n\n狀態：未審核（等待場地審核者核准）\n審核結果將反映在「My Bookings」頁面，並會以 email 同步通知。`);
                     }
                     
                 } catch (error) {
@@ -1073,10 +1128,11 @@
                     const detailStr = match ? `W${match[1]} ${currentDays[parseInt(match[2])]} P${match[3]} (${bookingDetail?.name})` : slotId;
                     addLog(decision === 'approved' ? "Approve Booking" : "Reject Booking", cartName, detailStr);
 
-                    // 🔧 寄結果信：申請人 + 該場地其他管理員（排除自己）
+                    // 🔧 寄結果信：申請人 + 該場地所有可登記者 + 該場地所有審核者
                     if (bookingDetail && match) {
                         const cartInfo = cartData[cartName] || {};
                         const allManagers = Array.isArray(cartInfo.managerEmails) ? cartInfo.managerEmails : [];
+                        const allRegistrants = Array.isArray(cartInfo.registrantEmails) ? cartInfo.registrantEmails : [];
                         const week = parseInt(match[1]);
                         const dayIdx = parseInt(match[2]);
                         const periodId = match[3];
@@ -1085,6 +1141,7 @@
                             decision,
                             applicantEmail: bookingDetail.ownerEmail || bookingDetail.email,
                             applicantName: bookingDetail.name,
+                            registrantEmails: allRegistrants,
                             otherManagerEmails: allManagers,
                             reviewerName: currentUser.name,
                             reviewerEmail: currentUser.email,
@@ -1104,6 +1161,47 @@
                     else { console.error(err); showAlert("審核失敗，請稍後再試。"); }
                 }
             };
+
+            // 🔧 從 email 一鍵審核：偵測 URL ?action=approve|reject&cart=X&slot=Y
+            // 流程：
+            //   1. 使用者點 email 中的「核准 / 退回」按鈕，瀏覽器開啟 https://app/?action=...
+            //   2. 若尚未登入，先顯示登入畫面，登入完成後本 effect 自動觸發
+            //   3. 確認此使用者是該場地的審核者，跳出 confirm 後執行 reviewBooking
+            //   4. 處理完清掉 URL 參數，避免重新整理時又跑一次
+            useEffect(() => {
+                if (!dbRefs) return;
+                if (!currentUser && !isAdmin) return;
+                if (window.__urlActionHandled) return;
+
+                const params = new URLSearchParams(window.location.search);
+                const action = params.get('action');
+                const cart   = params.get('cart');
+                const slot   = params.get('slot');
+                if (!action || !cart || !slot) return;
+                if (action !== 'approve' && action !== 'reject') return;
+
+                window.__urlActionHandled = true;
+
+                const decision = action === 'approve' ? 'approved' : 'rejected';
+                const decisionLabel = decision === 'approved' ? '核准' : '退回';
+
+                // 把 URL 參數清掉，避免下次重整又彈一次
+                const clearUrl = () => window.history.replaceState({}, '', window.location.pathname);
+
+                if (!canApproveCart(cart)) {
+                    showAlert(`🚫 你不是「${cart}」的場地審核者，無法執行此操作。\n如有需要請聯絡系統管理員調整審核者名單。`);
+                    clearUrl();
+                    return;
+                }
+
+                showConfirm(
+                    `📬 從 email 連結進入審核\n\n場地：${cart}\n動作：${decisionLabel}\n\n確認執行嗎？`,
+                    async () => {
+                        await reviewBooking(cart, slot, decision);
+                        clearUrl();
+                    }
+                );
+            }, [dbRefs, currentUser, isAdmin, canApproveCart]);
 
             // 計算「等待我審核」的清單（給管理者用）
             const pendingForMe = useMemo(() => {
@@ -1664,7 +1762,7 @@
                                                                         </h3>
                                                                     </div>
                                                                     <span className={`text-xs px-2.5 py-1 rounded-lg font-extrabold uppercase tracking-wider border-2 ${isPending ? 'bg-yellow-50 text-duo-yellowDark border-duo-yellow' : 'bg-blue-50 text-duo-blue border-blue-100'}`}>
-                                                                        {isPending ? '⏳ 申請中' : b.className}
+                                                                        {isPending ? '⏳ 未審核' : b.className}
                                                                     </span>
                                                                 </div>
 
@@ -1736,7 +1834,7 @@
                                                                                         return (
                                                                                             <div key={cName} className={`${isPending ? 'bg-duo-yellow shadow-[0_3px_0_0_#e5b400] hover:bg-[#e5b400]' : 'bg-duo-blue shadow-[0_3px_0_0_#1899d6] hover:bg-[#1899d6]'} text-white rounded-xl p-2 flex flex-col justify-center items-center cursor-pointer active:translate-y-[3px] active:shadow-none`} onClick={() => cancelBookingFromList(cName, slotId, cData.schedule[slotId].className)}>
                                                                                                 <span className="font-extrabold text-xs truncate w-full">{cName}</span>
-                                                                                                <span className="text-[10px] bg-black/20 px-1.5 rounded-md truncate">{isPending ? '⏳ 申請中' : cData.schedule[slotId].className}</span>
+                                                                                                <span className="text-[10px] bg-black/20 px-1.5 rounded-md truncate">{isPending ? '⏳ 未審核' : cData.schedule[slotId].className}</span>
                                                                                             </div>
                                                                                         );
                                                                                     })}
@@ -1964,7 +2062,7 @@
                                                                         >
                                                                             <span className="font-extrabold text-sm truncate w-full text-center leading-tight">{bookingInfo.name}</span>
                                                                             <span className="text-[11px] font-bold bg-black/10 px-2 py-0.5 rounded-full mt-1 truncate max-w-[90%]">
-                                                                                {bookingInfo.status === 'pending' ? '⏳ 申請中' : bookingInfo.className}
+                                                                                {bookingInfo.status === 'pending' ? '⏳ 未審核' : bookingInfo.className}
                                                                             </span>
                                                                         </div>
                                                                     ) : (
@@ -2163,6 +2261,26 @@
                                                             </div>
                                                             <button type="submit" className="w-full mt-2 bg-duo-green text-white font-extrabold uppercase py-3 rounded-2xl shadow-duo-green active:shadow-none active:translate-y-[4px] transition-all tracking-wider">Save Config</button>
                                                         </form>
+                                                    </div>
+
+                                                    {/* === Email 連線測試 === */}
+                                                    <h3 className="text-2xl font-extrabold text-duo-text mb-6 border-b-2 border-duo-grayBorder pb-4"><i className="fa-solid fa-envelope-circle-check text-duo-blue mr-2"></i> Email 寄信模組測試</h3>
+                                                    <div className="bg-duo-grayLight border-2 border-duo-grayBorder rounded-[2rem] p-6 mb-8">
+                                                        <p className="text-sm font-bold text-gray-500 mb-4 leading-relaxed">
+                                                            按下「測試連線」會：<br/>
+                                                            ① 對 GAS 發 ping 確認連線、密鑰是否正確<br/>
+                                                            ② 寄一封測試信到你的 Gmail，驗證 GmailApp 已授權<br/>
+                                                            <span className="text-duo-yellowDark">⚠️ 第一次使用前，請先到 GAS 編輯器選擇 <code className="bg-white px-1.5 py-0.5 rounded">sendTestEmail</code> 函式手動執行一次，授權 Gmail 權限。</span>
+                                                        </p>
+                                                        <button onClick={handleTestEmailConnection} className="w-full bg-duo-blue text-white font-extrabold uppercase py-3 rounded-2xl shadow-duo-blue active:shadow-none active:translate-y-[4px] transition-all tracking-wider">
+                                                            <i className="fa-solid fa-paper-plane mr-2"></i> 測試 Email 連線
+                                                        </button>
+                                                        <div className="mt-4 text-[11px] font-bold text-gray-400 leading-relaxed">
+                                                            目前設定：<br/>
+                                                            • WEB_APP_URL：<span className="text-duo-blue">{GAS_CONFIG.WEB_APP_URL.length > 60 ? GAS_CONFIG.WEB_APP_URL.slice(0,60)+'...' : GAS_CONFIG.WEB_APP_URL}</span><br/>
+                                                            • APP_URL：<span className="text-duo-blue">{GAS_CONFIG.APP_URL || '使用目前網頁網址'}</span><br/>
+                                                            • API_SECRET：<span className="text-duo-blue">{GAS_CONFIG.API_SECRET.replace(/./g,'•')} ({GAS_CONFIG.API_SECRET.length} 字)</span>
+                                                        </div>
                                                     </div>
 
                                                     <h3 className="text-2xl font-extrabold text-duo-text mb-6 border-b-2 border-duo-grayBorder pb-4"><i className="fa-solid fa-lock text-duo-red mr-2"></i> Recurring Locks</h3>
@@ -2409,7 +2527,7 @@
                                                 <div className="mb-6">
                                                     {bookingModal.existingBooking.status === 'pending' ? (
                                                         <span className="inline-block bg-duo-yellow/15 text-duo-yellowDark border-2 border-duo-yellow px-4 py-1.5 rounded-full text-xs font-extrabold uppercase tracking-wider">
-                                                            <i className="fa-solid fa-hourglass-half mr-1.5"></i> 申請中（等候審核）
+                                                            <i className="fa-solid fa-hourglass-half mr-1.5"></i> 未審核（等候審核）
                                                         </span>
                                                     ) : (
                                                         <span className="inline-block bg-duo-green/15 text-duo-greenDark border-2 border-duo-green px-4 py-1.5 rounded-full text-xs font-extrabold uppercase tracking-wider">
