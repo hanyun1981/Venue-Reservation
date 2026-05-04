@@ -413,6 +413,7 @@
                 return () => { unsubLogs(); };
             }, [dbRefs, isAdmin, adminTab]);
 
+            // 計算「現在這一刻是學期第幾週」，用於判斷預約是否在過去 / 是否超過提前預約上限
             useEffect(() => {
                 if (firebaseReady && firebaseReady !== 'auth-error') {
                     const now = new Date();
@@ -420,27 +421,22 @@
                     const start = new Date(year, month - 1, day);
                     start.setHours(0, 0, 0, 0);
                     now.setHours(0, 0, 0, 0);
-                    
+
                     const diffTime = now.getTime() - start.getTime();
                     const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
                     let currentWeekCalc = Math.floor(diffDays / 7) + 1;
-                    
+
                     if (currentWeekCalc < 1) currentWeekCalc = 1;
                     if (currentWeekCalc > semesterConfig.totalWeeks) currentWeekCalc = semesterConfig.totalWeeks;
-                    
+
                     setCurrentRealWeek(currentWeekCalc);
-
-                    if (!hasAutoSetWeek) {
-                        setSelectedWeek(currentWeekCalc);
-                        setHasAutoSetWeek(true); 
-                    }
                 }
-            }, [firebaseReady, semesterConfig, hasAutoSetWeek]);
+            }, [firebaseReady, semesterConfig]);
 
+            // 切換日期時清空批次選擇
             useEffect(() => {
-                if (selectedWeek > semesterConfig.totalWeeks) setSelectedWeek(semesterConfig.totalWeeks);
                 setBatchSelection([]);
-            }, [selectedWeek, semesterConfig.totalWeeks]);
+            }, [selectedDate]);
 
             // =================================================================
             // 🔧 FIX [效能]: 用 useMemo 快取計算結果
@@ -453,6 +449,31 @@
                 const source = Object.keys(cartData).length > 0 ? cartData : initialData;
                 return Object.entries(source).sort((a, b) => (a[1].order || 0) - (b[1].order || 0));
             }, [cartData]);
+
+            // 🔧 由「日期」推算「第幾週」：以學期起始日為基準，每 7 天為一週
+            // 若日期超出學期範圍會 clamp 到 [1, totalWeeks]
+            const selectedWeek = useMemo(() => {
+                if (!selectedDate || !semesterConfig.startDate) return 1;
+                const [y, m, d] = selectedDate.split('-').map(Number);
+                const date = new Date(y, m - 1, d);
+                const [sy, sm, sd] = semesterConfig.startDate.split('-').map(Number);
+                const start = new Date(sy, sm - 1, sd);
+                date.setHours(0, 0, 0, 0);
+                start.setHours(0, 0, 0, 0);
+                const diffDays = Math.floor((date.getTime() - start.getTime()) / 86400000);
+                let w = Math.floor(diffDays / 7) + 1;
+                if (w < 1) w = 1;
+                if (w > semesterConfig.totalWeeks) w = semesterConfig.totalWeeks;
+                return w;
+            }, [selectedDate, semesterConfig]);
+
+            // 由「日期」推算對應的星期幾 index：0=Mon ~ 6=Sun
+            const selectedDayIdx = useMemo(() => {
+                if (!selectedDate) return 0;
+                const [y, m, d] = selectedDate.split('-').map(Number);
+                const w = new Date(y, m - 1, d).getDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+                return w === 0 ? 6 : w - 1;
+            }, [selectedDate]);
 
             const filteredCarts = useMemo(() =>
                 sortedAllCarts
@@ -467,11 +488,6 @@
                 [cartData]
             );
 
-            const weeksArray = useMemo(() =>
-                Array.from({ length: semesterConfig.totalWeeks }, (_, i) => i + 1),
-                [semesterConfig.totalWeeks]
-            );
-            
             const moveCart = async (cartName, direction) => {
                 const sortedNames = sortedAllCarts.map(arr => arr[0]);
                 const idx = sortedNames.indexOf(cartName);
@@ -711,8 +727,9 @@
                             batch.update(dbRefs.getDocRef('carts', cartName), { schedule: {} });
                         }
                         await batch.commit();
-                        
-                        setSelectedWeek(1);
+
+                        // 清完資料後，把日期跳回學期第一天，方便管理員確認
+                        setSelectedDate(semesterConfig.startDate);
                         addLog("Clear Data", "System", "Admin cleared all booking records (New Semester)");
                         showAlert("All booking data has been cleared!");
                     } catch (error) {
@@ -1489,18 +1506,52 @@
 
                         <div className="bg-duo-grayLight border-t-2 border-duo-grayBorder px-4 py-3">
                             <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
-                                <div className="flex items-center space-x-3">
-                                    <span className="font-extrabold text-duo-text/60 uppercase tracking-wider text-sm">Week:</span>
-                                    <div className="relative">
-                                        <select value={selectedWeek} onChange={(e) => setSelectedWeek(Number(e.target.value))} className="appearance-none bg-white border-2 border-duo-grayBorder rounded-xl pl-4 pr-10 py-2 text-sm font-extrabold text-duo-blue outline-none cursor-pointer hover:bg-gray-50 transition-colors">
-                                            {weeksArray.map(w => (
-                                                <option key={w} value={w}>Wk {w} ({getWeekDateRange(w, allowSaturday)})</option>
-                                            ))}
-                                        </select>
-                                        <i className="fa-solid fa-chevron-down absolute right-4 top-1/2 -translate-y-1/2 text-duo-grayBorder pointer-events-none text-xs"></i>
+                                <div className="flex flex-wrap items-center gap-3">
+                                    <span className="font-extrabold text-duo-text/60 uppercase tracking-wider text-sm">
+                                        <i className="fa-regular fa-calendar mr-1 text-duo-blue"></i>選擇日期：
+                                    </span>
+                                    <input
+                                        type="date"
+                                        value={selectedDate}
+                                        onChange={(e) => setSelectedDate(e.target.value)}
+                                        className="bg-white border-2 border-duo-grayBorder rounded-xl px-4 py-2 text-sm font-extrabold text-duo-blue outline-none cursor-pointer hover:bg-gray-50 transition-colors"
+                                    />
+                                    {/* 快捷按鈕：今天 / 前一天 / 後一天 */}
+                                    <div className="flex items-center gap-1">
+                                        <button
+                                            onClick={() => {
+                                                const [y, m, d] = selectedDate.split('-').map(Number);
+                                                const dt = new Date(y, m - 1, d);
+                                                dt.setDate(dt.getDate() - 1);
+                                                setSelectedDate(`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`);
+                                            }}
+                                            className="w-8 h-8 bg-white border-2 border-duo-grayBorder rounded-lg text-duo-blue text-xs font-extrabold hover:bg-gray-50"
+                                            title="前一天"
+                                        ><i className="fa-solid fa-chevron-left"></i></button>
+                                        <button
+                                            onClick={() => {
+                                                const t = new Date();
+                                                setSelectedDate(`${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`);
+                                            }}
+                                            className="px-3 h-8 bg-white border-2 border-duo-grayBorder rounded-lg text-duo-blue text-xs font-extrabold hover:bg-gray-50 uppercase tracking-wider"
+                                            title="跳到今天"
+                                        >今天</button>
+                                        <button
+                                            onClick={() => {
+                                                const [y, m, d] = selectedDate.split('-').map(Number);
+                                                const dt = new Date(y, m - 1, d);
+                                                dt.setDate(dt.getDate() + 1);
+                                                setSelectedDate(`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`);
+                                            }}
+                                            className="w-8 h-8 bg-white border-2 border-duo-grayBorder rounded-lg text-duo-blue text-xs font-extrabold hover:bg-gray-50"
+                                            title="後一天"
+                                        ><i className="fa-solid fa-chevron-right"></i></button>
                                     </div>
+                                    <span className="text-xs font-bold text-gray-500 bg-white border-2 border-duo-grayBorder rounded-lg px-3 py-1.5">
+                                        {currentDays[selectedDayIdx]} · 該週 ({getWeekDateRange(selectedWeek, true)})
+                                    </span>
                                     {!isAdmin && selectedWeek > currentRealWeek + (semesterConfig.maxAdvanceWeeks || 2) && (
-                                        <span className="text-xs font-bold text-duo-red bg-red-50 px-2 py-1 rounded-lg border border-red-200"><i className="fa-solid fa-lock mr-1"></i>Exceeds limit</span>
+                                        <span className="text-xs font-bold text-duo-red bg-red-50 px-2 py-1 rounded-lg border border-red-200"><i className="fa-solid fa-lock mr-1"></i>超過提前預約上限</span>
                                     )}
                                 </div>
                                 <div className="text-xs font-extrabold text-duo-text/60 uppercase tracking-wider">
@@ -1648,7 +1699,7 @@
                                     ) : (
                                         <div className="bg-white rounded-[2rem] border-2 border-duo-grayBorder shadow-duo-card overflow-hidden">
                                             <div className="overflow-x-auto p-4 custom-scrollbar">
-                                                <div className="mb-4 text-center font-extrabold text-duo-text text-xl">Week {selectedWeek} Schedule</div>
+                                                <div className="mb-4 text-center font-extrabold text-duo-text text-xl">{selectedDate} 所在週的排程（{getWeekDateRange(selectedWeek, true)}）</div>
                                                 <table className="w-full min-w-[700px] border-separate border-spacing-2">
                                                     <thead>
                                                         <tr>
@@ -1859,14 +1910,17 @@
                                                     <th className="p-2 w-32 sm:w-40 text-center font-extrabold text-gray-400 uppercase tracking-wider text-sm border-b-2 border-duo-grayBorder pb-4 align-bottom sticky left-0 bg-white z-20 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]">
                                                         <div className="flex items-center justify-center h-full pb-1">Period</div>
                                                     </th>
-                                                    {currentDays.map((day, dayIdx) => (
-                                                        <th key={day} className="p-2 text-center font-extrabold text-duo-text uppercase tracking-wider text-sm border-b-2 border-duo-grayBorder pb-4">
+                                                    {currentDays.map((day, dayIdx) => {
+                                                        const isSelectedDay = dayIdx === selectedDayIdx;
+                                                        return (
+                                                        <th key={day} className={`p-2 text-center font-extrabold uppercase tracking-wider text-sm border-b-2 pb-4 ${isSelectedDay ? 'text-duo-blue border-duo-blue bg-blue-50/50 rounded-t-xl' : 'text-duo-text border-duo-grayBorder'}`}>
                                                             <div className="flex flex-col items-center">
-                                                                <span>{day}</span>
-                                                                <span className="text-[11px] text-gray-400 mt-1 font-bold bg-duo-grayLight px-2 py-0.5 rounded-lg tracking-widest">{getDateForDayIdx(selectedWeek, dayIdx)}</span>
+                                                                <span>{day}{isSelectedDay && <i className="fa-solid fa-circle-dot ml-1 text-[10px]"></i>}</span>
+                                                                <span className={`text-[11px] mt-1 font-bold px-2 py-0.5 rounded-lg tracking-widest ${isSelectedDay ? 'text-duo-blue bg-blue-100' : 'text-gray-400 bg-duo-grayLight'}`}>{getDateForDayIdx(selectedWeek, dayIdx)}</span>
                                                             </div>
                                                         </th>
-                                                    ))}
+                                                        );
+                                                    })}
                                                 </tr>
                                             </thead>
                                             <tbody>
@@ -2178,7 +2232,7 @@
                                 </div>
                                 <div className="bg-white rounded-[2rem] border-2 border-duo-grayBorder shadow-duo-card p-8">
                                     <h2 className="text-3xl font-extrabold text-duo-text mb-2"><i className="fa-solid fa-print text-duo-blue mr-3"></i>Print Records</h2>
-                                    <p className="font-bold text-gray-500 mb-8 border-b-2 border-duo-grayBorder pb-4">Week selected: <span className="text-duo-blue font-extrabold px-2 py-1 bg-blue-50 rounded-lg">Week {selectedWeek}</span></p>
+                                    <p className="font-bold text-gray-500 mb-8 border-b-2 border-duo-grayBorder pb-4">列印週：<span className="text-duo-blue font-extrabold px-2 py-1 bg-blue-50 rounded-lg">{selectedDate}（所在週 {getWeekDateRange(selectedWeek, true)}）</span></p>
                                     
                                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4 mb-8">
                                         {sortedAllCarts.map(([name, data]) => {
@@ -2207,7 +2261,7 @@
         <div key={cartName} className="page-break w-full">
             <div className="text-center mb-2">
                 <h2 className="text-2xl font-bold">{cartName} 預約清單</h2>
-                <p className="text-sm mt-1">Week {selectedWeek} ( {getWeekDateRange(selectedWeek, allowSaturday)} )</p>
+                <p className="text-sm mt-1">所選日期 {selectedDate} 所在週 ({getWeekDateRange(selectedWeek, true)})</p>
             </div>
             
             <table className="w-full text-xs">
