@@ -111,6 +111,7 @@
             APP_URL: 'https://hanyun1981.github.io/Venue-Reservation/',
             API_SECRET: 'sport-venue-2026-XYZabc!@#'
         };
+        const SUPER_ADMIN_EMAIL = 'hanyun@ibsh.tw';
 
         const firebaseConfig = isCanvasEnv ? JSON.parse(__firebase_config) : defaultFirebaseConfig;
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'cartreserver-app';
@@ -233,6 +234,7 @@
             const [batchSelection, setBatchSelection] = useState([]);
             const [myBookingsView, setMyBookingsView] = useState('list');
             const [myBookingsTab, setMyBookingsTab] = useState('upcoming');
+            const [myBookingsStatusTab, setMyBookingsStatusTab] = useState('all');
 
             const changeView = (newView) => {
                 if (newView === currentView) return;
@@ -299,14 +301,13 @@
                     }
 
                     // 監聽 Auth 狀態：處理頁面重整時的 session 恢復
-                    const ADMIN_EMAIL = 'hanyun@ibsh.tw';
                     fb.onAuthStateChanged(auth, async (user) => {
                         if (user && user.email) {
                             // 已有 Google session，自動恢復登入狀態
-                            // 硬編碼的 ADMIN_EMAIL 永遠是超級管理員（即使資料庫沒有此帳號）
-                            if (user.email === ADMIN_EMAIL) {
+                            // 硬編碼的 SUPER_ADMIN_EMAIL 永遠是超級管理員（即使資料庫沒有此帳號）
+                            if ((user.email || '').trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase()) {
                                 setIsAdmin(true);
-                                setCurrentUser({ name: 'System Admin', email: ADMIN_EMAIL, defaultClass: 'Admin', customClass: '', role: 'super_admin' });
+                                setCurrentUser({ name: 'System Admin', email: SUPER_ADMIN_EMAIL, defaultClass: 'Admin', customClass: '', role: 'super_admin' });
                             } else {
                                 try {
                                     const userDocRef = refs.getDocRef('users', user.email);
@@ -586,7 +587,6 @@
             // 🔧 共用：以 email 直接登入（不經 Google OAuth）
             // 用於 Canvas / file:// / about:srcdoc 等無法跑 OAuth 的環境，
             // 也用於正式環境下「Google 登入失敗」時的備援按鈕。
-            const ADMIN_EMAIL = 'hanyun@ibsh.tw';
             const loginWithEmail = async (rawEmail) => {
                 if (!rawEmail) return;
                 const email = rawEmail.trim().toLowerCase();
@@ -594,9 +594,9 @@
                     showAlert("請輸入有效的 Email 格式。");
                     return;
                 }
-                if (email === ADMIN_EMAIL.toLowerCase()) {
+                if (email === SUPER_ADMIN_EMAIL.toLowerCase()) {
                     setIsAdmin(true);
-                    setCurrentUser({ name: 'System Admin', email: ADMIN_EMAIL, defaultClass: 'Admin', customClass: '', role: 'super_admin' });
+                    setCurrentUser({ name: 'System Admin', email: SUPER_ADMIN_EMAIL, defaultClass: 'Admin', customClass: '', role: 'super_admin' });
                     goHome();
                     return;
                 }
@@ -619,7 +619,7 @@
 
             // 「Email 登入」按鈕：跳出 prompt 讓使用者輸入 email
             const handleEmailLogin = async () => {
-                const inputEmail = prompt(`【Email 登入】\n\n請輸入已加入白名單的 Email：\n(最高權限管理員請輸入 ${ADMIN_EMAIL})`, '');
+                const inputEmail = prompt(`【Email 登入】\n\n請輸入已加入白名單的 Email：\n(最高權限管理員請輸入 ${SUPER_ADMIN_EMAIL})`, '');
                 if (inputEmail) await loginWithEmail(inputEmail);
             };
 
@@ -641,7 +641,7 @@
 
                     // onAuthStateChanged 會自動處理 session 恢復，
                     // 但如果白名單中沒有此帳號，需要立即登出並顯示錯誤。
-                    if (userEmail !== ADMIN_EMAIL) {
+                    if ((userEmail || '').trim().toLowerCase() !== SUPER_ADMIN_EMAIL.toLowerCase()) {
                         const userDocRef = dbRefs.getDocRef('users', userEmail);
                         const userDoc = await dbRefs.fb.getDoc(userDocRef);
                         if (!userDoc.exists()) {
@@ -1088,11 +1088,17 @@
             const executeBookingTransaction = async (slotsToBook, finalClass) => {
                 const cartRef = dbRefs.getDocRef('carts', selectedCart);
 
-                // 預約是否需要審核：只要該場地有設定任何管理員就需要審核
+                // 預約是否需要審核：除了最高管理員之外，所有登記都需要審核。
+                // 審核通知固定寄給最高管理員，並加上該場地設定的審核者。
                 const cartInfo = cartData[selectedCart] || {};
                 const managerEmails = (Array.isArray(cartInfo.managerEmails) ? cartInfo.managerEmails : []).filter(Boolean);
-                // 超級管理員自己預約不需要審核；其他使用者只要場地有管理員就需要審核
-                const needsApproval = managerEmails.length > 0 && !isAdmin;
+                const applicantEmailLower = (currentUser.email || '').trim().toLowerCase();
+                const reviewManagerEmails = Array.from(new Set([SUPER_ADMIN_EMAIL, ...managerEmails]
+                    .filter(Boolean)
+                    .map(e => String(e).trim().toLowerCase())
+                    .filter(e => e && e !== applicantEmailLower)
+                ));
+                const needsApproval = !isAdmin;
                 const initialStatus = needsApproval ? 'pending' : 'approved';
 
                 try {
@@ -1129,11 +1135,11 @@
                     setBatchSelection([]);
                     setIsBatchMode(false);
 
-                    // 🔧 寄信通知所有管理員（只在 pending 時寄）
+                    // 🔧 寄信通知最高管理員與該場地審核者（只在 pending 時寄）
                     // 每筆 slot 各自附「核准 / 退回」一鍵按鈕，由 GAS 端的 buildActionUrl() 生成連結
                     if (needsApproval) {
                         sendApprovalEmail({
-                            managerEmails,
+                            managerEmails: reviewManagerEmails,
                             cartName: selectedCart,
                             applicantName: currentUser.name,
                             applicantEmail: currentUser.email,
@@ -1149,7 +1155,7 @@
                                 };
                             })
                         });
-                        showAlert(`✅ 預約已送出！\n\n狀態：未審核（等待場地審核者核准）\n審核結果將反映在「My Bookings」頁面，並會以 email 同步通知。`);
+                        showAlert(`✅ 預約已送出！\n\n狀態：未審核（等待最高管理員或場地審核者核准）\n審核結果將反映在「My Bookings」頁面，並會以 email 同步通知。`);
                     }
                     
                 } catch (error) {
@@ -1224,7 +1230,10 @@
                     // 🔧 寄結果信：申請人 + 該場地所有可登記者 + 該場地所有審核者
                     if (bookingDetail && match) {
                         const cartInfo = cartData[cartName] || {};
-                        const allManagers = Array.isArray(cartInfo.managerEmails) ? cartInfo.managerEmails : [];
+                        const allManagers = Array.from(new Set([SUPER_ADMIN_EMAIL, ...(Array.isArray(cartInfo.managerEmails) ? cartInfo.managerEmails : [])]
+                            .filter(Boolean)
+                            .map(e => String(e).trim().toLowerCase())
+                        ));
                         const allRegistrants = Array.isArray(cartInfo.registrantEmails) ? cartInfo.registrantEmails : [];
                         const week = parseInt(match[1]);
                         const dayIdx = parseInt(match[2]);
@@ -1504,7 +1513,15 @@
                             if (bookingInfo.ownerEmail === currentUser.email) {
                                 const match = slotId.match(/w(\d+)_d(\d+)_p(\w+)/);
                                 if (match) {
-                                    myBookings.push({ cartName, week: parseInt(match[1]), dayIdx: parseInt(match[2]), periodId: match[3], slotId, className: bookingInfo.className });
+                                    myBookings.push({
+                                        cartName,
+                                        week: parseInt(match[1]),
+                                        dayIdx: parseInt(match[2]),
+                                        periodId: match[3],
+                                        slotId,
+                                        className: bookingInfo.className,
+                                        status: bookingInfo.status || 'approved'
+                                    });
                                 }
                             }
                         });
@@ -1559,7 +1576,14 @@
                 allMyBookings.filter(b => b.week < currentRealWeek || (b.week === currentRealWeek && b.dayIdx < currentRealDayIdx)),
                 [allMyBookings, currentRealWeek, currentRealDayIdx]
             );
-            const displayedBookings = myBookingsTab === 'upcoming' ? upcomingBookings : historyBookings;
+            const baseDisplayedBookings = myBookingsTab === 'upcoming' ? upcomingBookings : historyBookings;
+            const pendingDisplayedCount = baseDisplayedBookings.filter(b => b.status === 'pending').length;
+            const approvedDisplayedCount = baseDisplayedBookings.filter(b => b.status !== 'pending').length;
+            const displayedBookings = myBookingsStatusTab === 'pending'
+                ? baseDisplayedBookings.filter(b => b.status === 'pending')
+                : myBookingsStatusTab === 'approved'
+                    ? baseDisplayedBookings.filter(b => b.status !== 'pending')
+                    : baseDisplayedBookings;
 
             if (firebaseReady === 'auth-error') {
                 return (
@@ -1832,21 +1856,32 @@
                                                     History ({historyBookings.length})
                                                 </button>
                                             </div>
+                                            <div className="flex gap-2 overflow-x-auto hide-scrollbar py-1 mb-6">
+                                                <button onClick={() => setMyBookingsStatusTab('all')} className={`px-4 py-2 rounded-xl font-extrabold text-sm transition-all whitespace-nowrap border-2 ${myBookingsStatusTab === 'all' ? 'bg-white text-duo-text border-duo-text shadow-[0_3px_0_0_#4b4b4b]' : 'bg-white text-gray-400 border-duo-grayBorder hover:bg-gray-50'}`}>
+                                                    <i className="fa-solid fa-layer-group mr-1.5"></i> 全部 ({baseDisplayedBookings.length})
+                                                </button>
+                                                <button onClick={() => setMyBookingsStatusTab('pending')} className={`px-4 py-2 rounded-xl font-extrabold text-sm transition-all whitespace-nowrap border-2 ${myBookingsStatusTab === 'pending' ? 'bg-duo-yellow/15 text-duo-yellowDark border-duo-yellow shadow-[0_3px_0_0_#e5b400]' : 'bg-white text-gray-400 border-duo-grayBorder hover:bg-yellow-50'}`}>
+                                                    <i className="fa-solid fa-hourglass-half mr-1.5"></i> 審核中 ({pendingDisplayedCount})
+                                                </button>
+                                                <button onClick={() => setMyBookingsStatusTab('approved')} className={`px-4 py-2 rounded-xl font-extrabold text-sm transition-all whitespace-nowrap border-2 ${myBookingsStatusTab === 'approved' ? 'bg-duo-green/15 text-duo-greenDark border-duo-green shadow-[0_3px_0_0_#58a700]' : 'bg-white text-gray-400 border-duo-grayBorder hover:bg-green-50'}`}>
+                                                    <i className="fa-solid fa-circle-check mr-1.5"></i> 預約成功 ({approvedDisplayedCount})
+                                                </button>
+                                            </div>
 
                                             {displayedBookings.length === 0 ? (
                                                 <div className="text-center py-16 bg-white rounded-3xl border-2 border-duo-grayBorder border-dashed">
                                                     <i className="fa-solid fa-box-open text-5xl text-gray-300 mb-4"></i>
-                                                    <h3 className="text-xl font-extrabold text-gray-400">No {myBookingsTab} bookings</h3>
+                                                    <h3 className="text-xl font-extrabold text-gray-400">目前沒有符合條件的預約</h3>
                                                 </div>
                                             ) : (
                                                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
                                                     {displayedBookings.map((b, idx) => {
                                                         const targetPeriod = periods.find(p => p.id == b.periodId);
-                                                        const bStatus = cartData[b.cartName]?.schedule?.[b.slotId]?.status;
+                                                        const bStatus = cartData[b.cartName]?.schedule?.[b.slotId]?.status || b.status;
                                                         const isPending = bStatus === 'pending';
                                                         return (
                                                             <div key={idx} className={`bg-white rounded-3xl border-2 border-duo-grayBorder shadow-[0_6px_0_0_#e5e5e5] p-5 flex flex-col relative overflow-hidden group transition-colors ${myBookingsTab === 'history' ? 'opacity-80' : 'hover:border-duo-blue'}`}>
-                                                                <div className={`absolute top-0 left-0 w-2 h-full ${myBookingsTab === 'history' ? 'bg-gray-400' : (isPending ? 'bg-duo-yellow' : 'bg-duo-blue')}`}></div>
+                                                                <div className={`absolute top-0 left-0 w-2 h-full ${myBookingsTab === 'history' ? 'bg-gray-400' : (isPending ? 'bg-duo-yellow' : 'bg-duo-green')}`}></div>
                                                                 <div className="flex justify-between items-start pl-2 mb-3">
                                                                     <div>
                                                                         <h3 className="font-extrabold text-xl text-duo-text flex items-center">
@@ -1854,8 +1889,17 @@
                                                                             <span className="ml-3">{b.cartName}</span>
                                                                         </h3>
                                                                     </div>
-                                                                    <span className={`text-xs px-2.5 py-1 rounded-lg font-extrabold uppercase tracking-wider border-2 ${isPending ? 'bg-yellow-50 text-duo-yellowDark border-duo-yellow' : 'bg-blue-50 text-duo-blue border-blue-100'}`}>
-                                                                        {isPending ? '⏳ 未審核' : b.className}
+                                                                    <span className={`text-xs px-2.5 py-1 rounded-lg font-extrabold uppercase tracking-wider border-2 ${isPending ? 'bg-yellow-50 text-duo-yellowDark border-duo-yellow' : 'bg-green-50 text-duo-greenDark border-duo-green'}`}>
+                                                                        {isPending ? (
+                                                                            <><i className="fa-solid fa-hourglass-half mr-1"></i>審核中</>
+                                                                        ) : (
+                                                                            <><i className="fa-solid fa-circle-check mr-1"></i>預約成功</>
+                                                                        )}
+                                                                    </span>
+                                                                </div>
+                                                                <div className="pl-2 mb-3">
+                                                                    <span className="inline-flex items-center bg-gray-100 text-gray-500 rounded-lg px-2.5 py-1 text-xs font-extrabold">
+                                                                        <i className="fa-solid fa-users mr-1.5 text-gray-400"></i>{b.className}
                                                                     </span>
                                                                 </div>
 
@@ -1925,9 +1969,15 @@
                                                                                         const stat = cData.schedule[slotId].status;
                                                                                         const isPending = stat === 'pending';
                                                                                         return (
-                                                                                            <div key={cName} className={`${isPending ? 'bg-duo-yellow shadow-[0_3px_0_0_#e5b400] hover:bg-[#e5b400]' : 'bg-duo-blue shadow-[0_3px_0_0_#1899d6] hover:bg-[#1899d6]'} text-white rounded-xl p-2 flex flex-col justify-center items-center cursor-pointer active:translate-y-[3px] active:shadow-none`} onClick={() => cancelBookingFromList(cName, slotId, cData.schedule[slotId].className)}>
+                                                                                            <div key={cName} className={`${isPending ? 'bg-duo-yellow shadow-[0_3px_0_0_#e5b400] hover:bg-[#e5b400]' : 'bg-duo-green shadow-[0_3px_0_0_#58a700] hover:bg-[#46a302]'} text-white rounded-xl p-2 flex flex-col justify-center items-center cursor-pointer active:translate-y-[3px] active:shadow-none`} onClick={() => cancelBookingFromList(cName, slotId, cData.schedule[slotId].className)}>
                                                                                                 <span className="font-extrabold text-xs truncate w-full">{cName}</span>
-                                                                                                <span className="text-[10px] bg-black/20 px-1.5 rounded-md truncate">{isPending ? '⏳ 未審核' : cData.schedule[slotId].className}</span>
+                                                                                                <span className="text-[10px] bg-black/20 px-1.5 rounded-md truncate">
+                                                                                                    {isPending ? (
+                                                                                                        <><i className="fa-solid fa-hourglass-half mr-1"></i>審核中</>
+                                                                                                    ) : (
+                                                                                                        <><i className="fa-solid fa-circle-check mr-1"></i>預約成功</>
+                                                                                                    )}
+                                                                                                </span>
                                                                                             </div>
                                                                                         );
                                                                                     })}
@@ -2149,13 +2199,16 @@
                                                                                 bookingInfo.status === 'pending'
                                                                                     ? 'bg-duo-yellow text-white shadow-[0_4px_0_0_#e5b400] cursor-pointer hover:bg-[#e5b400] active:shadow-none active:translate-y-[4px]'
                                                                                     : (isMyBooking || isAdmin || canApproveCart(selectedCart))
-                                                                                        ? 'bg-duo-blue text-white shadow-[0_4px_0_0_#1899d6] cursor-pointer hover:bg-[#1899d6] active:shadow-none active:translate-y-[4px]'
+                                                                                        ? 'bg-duo-green text-white shadow-duo-green cursor-pointer hover:bg-[#46a302] active:shadow-none active:translate-y-[4px]'
                                                                                         : 'bg-gray-100 text-gray-400 border-2 border-duo-grayBorder cursor-not-allowed opacity-80'
                                                                             }`}
                                                                         >
+                                                                            <div className={`w-7 h-7 rounded-full flex items-center justify-center mb-1 ${bookingInfo.status === 'pending' ? 'bg-white/25' : 'bg-white/20'}`}>
+                                                                                <i className={`fa-solid ${bookingInfo.status === 'pending' ? 'fa-hourglass-half' : 'fa-circle-check'} text-sm`}></i>
+                                                                            </div>
                                                                             <span className="font-extrabold text-sm truncate w-full text-center leading-tight">{bookingInfo.name}</span>
                                                                             <span className="text-[11px] font-bold bg-black/10 px-2 py-0.5 rounded-full mt-1 truncate max-w-[90%]">
-                                                                                {bookingInfo.status === 'pending' ? '⏳ 未審核' : bookingInfo.className}
+                                                                                {bookingInfo.status === 'pending' ? '審核中' : '預約成功'}
                                                                             </span>
                                                                         </div>
                                                                     ) : (
@@ -2247,7 +2300,7 @@
                                                                             {data.managerEmails.map(em => usersDB[em]?.name || em).join('、')}
                                                                         </div>
                                                                     ) : (
-                                                                        <div className="text-[11px] font-bold text-gray-300 mt-0.5 truncate"><i className="fa-solid fa-circle-info mr-1"></i>無審核者（不需審核）</div>
+                                                                        <div className="text-[11px] font-bold text-gray-300 mt-0.5 truncate"><i className="fa-solid fa-circle-info mr-1"></i>無指定審核者（由最高管理員審核）</div>
                                                                     )}
                                                                 </div>
                                                             </div>
@@ -2826,8 +2879,8 @@
                                                 ))}
                                         </select>
                                         <p className="text-[11px] font-bold text-gray-400 mt-1.5 leading-snug">
-                                            未選 = 預約不需審核，直接通過。<br/>
-                                            選擇後，預約申請會自動寄信通知所有審核者，任一人核准即可；通過後會 email 通知登記者與審核者。<br/>
+                                            未選 = 預約申請會寄給最高管理員審核。<br/>
+                                            選擇後，預約申請會寄給最高管理員與所有指定審核者，任一人核准即可；通過後會 email 通知登記者與審核者。<br/>
                                             <span className="text-duo-yellowDark">ℹ️ 名單只列出角色為「場地審核者」或「超級管理員」，且未在登記者名單中的使用者。</span>
                                         </p>
                                     </div>
