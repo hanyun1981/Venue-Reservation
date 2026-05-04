@@ -108,7 +108,7 @@
         // 3. API_SECRET  - 必須與 GAS 程式碼中的 CONFIG.API_SECRET 完全一致
         const GAS_CONFIG = {
             WEB_APP_URL: 'https://script.google.com/macros/s/AKfycbw8A5lvt-GkIbxKpIS_kOTNdC1A9po0rSezlyv3ym3Ux6kjHl95zDcfHFgyoTNDymPR9Q/exec',
-            APP_URL: 'https://venus-reservation.web.app',
+            APP_URL: 'https://hanyun1981.github.io/Venue-Reservation/',
             API_SECRET: 'sport-venue-2026-XYZabc!@#'
         };
 
@@ -184,6 +184,14 @@
             
             const [semesterConfig, setSemesterConfig] = useState({ startDate: '2026-02-23', totalWeeks: 19, maxAdvanceWeeks: 2 });
             const [tempSemesterConfig, setTempSemesterConfig] = useState({ ...semesterConfig });
+            const [emailConfig, setEmailConfig] = useState({
+                webAppUrl: GAS_CONFIG.WEB_APP_URL,
+                appUrl: GAS_CONFIG.APP_URL
+            });
+            const [tempEmailConfig, setTempEmailConfig] = useState({
+                webAppUrl: GAS_CONFIG.WEB_APP_URL,
+                appUrl: GAS_CONFIG.APP_URL
+            });
 
             const [currentRealWeek, setCurrentRealWeek] = useState(1);
             const [allowSaturday, setAllowSaturday] = useState(true);
@@ -359,10 +367,22 @@
                             setTempSemesterConfig({ ...data.semesterConfig, maxAdvanceWeeks: data.semesterConfig.maxAdvanceWeeks || 2 });
                         }
                         if (data.allowSaturday !== undefined) setAllowSaturday(data.allowSaturday);
+                        if (data.emailConfig) {
+                            const nextEmailConfig = {
+                                webAppUrl: data.emailConfig.webAppUrl || GAS_CONFIG.WEB_APP_URL,
+                                appUrl: data.emailConfig.appUrl || GAS_CONFIG.APP_URL
+                            };
+                            setEmailConfig(nextEmailConfig);
+                            setTempEmailConfig(nextEmailConfig);
+                        }
                         setRecurringLocks(Array.isArray(data.recurringLocks) ? data.recurringLocks : []);
                     } else {
                         dbRefs.fb.setDoc(dbRefs.getDocRef('settings', 'main'), {
                             semesterConfig: { startDate: '2026-02-23', totalWeeks: 19, maxAdvanceWeeks: 2 },
+                            emailConfig: {
+                                webAppUrl: GAS_CONFIG.WEB_APP_URL,
+                                appUrl: GAS_CONFIG.APP_URL
+                            },
                             allowSaturday: false
                         }).catch(e => {});
                     }
@@ -721,6 +741,78 @@
                 showAlert("Semester configuration updated successfully!");
             };
 
+            const handleEmailConfigSave = async (e) => {
+                e.preventDefault();
+                const nextEmailConfig = {
+                    webAppUrl: (tempEmailConfig.webAppUrl || '').trim(),
+                    appUrl: (tempEmailConfig.appUrl || '').trim()
+                };
+                if (!nextEmailConfig.webAppUrl) {
+                    showAlert("請填入 GAS Web App URL。");
+                    return;
+                }
+                if (!nextEmailConfig.webAppUrl.startsWith('https://script.google.com/macros/s/')) {
+                    showAlert("GAS Web App URL 格式看起來不正確，請貼上以 https://script.google.com/macros/s/ 開頭、/exec 結尾的網址。");
+                    return;
+                }
+                await dbRefs.fb.setDoc(dbRefs.getDocRef('settings', 'main'), { emailConfig: nextEmailConfig }, { merge: true });
+                setEmailConfig(nextEmailConfig);
+                setTempEmailConfig(nextEmailConfig);
+                addLog("Update Email Config", "System", `GAS URL updated, APP URL: ${nextEmailConfig.appUrl || 'current page'}`);
+                showAlert("Email 設定已更新。");
+            };
+
+            const handleTestEmailUrls = async () => {
+                const webAppUrl = (tempEmailConfig.webAppUrl || '').trim();
+                const appUrl = (tempEmailConfig.appUrl || '').trim();
+
+                if (!webAppUrl) {
+                    showAlert("請先填入 GAS Web App URL。");
+                    return;
+                }
+                if (!webAppUrl.startsWith('https://script.google.com/macros/s/')) {
+                    showAlert("GAS Web App URL 格式看起來不正確，請貼上 Google Apps Script 部署後的 /exec 網址。");
+                    return;
+                }
+
+                let gasMessage = '';
+                try {
+                    const res = await fetch(webAppUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                        body: JSON.stringify({
+                            secret: GAS_CONFIG.API_SECRET,
+                            action: 'ping'
+                        }),
+                        redirect: 'follow'
+                    });
+                    const text = await res.text();
+                    const result = JSON.parse(text);
+                    gasMessage = result.ok
+                        ? '✅ GAS URL 測試成功，可以連線。'
+                        : `❌ GAS URL 有回應，但密鑰或程式可能不正確：${result.error || '未知錯誤'}`;
+                } catch (err) {
+                    gasMessage = `❌ GAS URL 測試失敗：${err.message || err}`;
+                }
+
+                if (!appUrl) {
+                    showAlert(`${gasMessage}\n\nAPP_URL 未填，email 審核按鈕會使用目前網頁網址。`);
+                    return;
+                }
+
+                try {
+                    new URL(appUrl);
+                } catch (err) {
+                    showAlert(`${gasMessage}\n\n❌ APP_URL 格式不正確，請確認網址是否完整。`);
+                    return;
+                }
+
+                showConfirm(
+                    `${gasMessage}\n\n✅ APP_URL 格式正常。\n\n要開啟 APP_URL 測試公開網站是否能正常載入嗎？`,
+                    () => window.open(appUrl, '_blank', 'noopener,noreferrer')
+                );
+            };
+
             const handleClearSemesterData = () => {
                 showConfirm("⚠️ WARNING: Are you sure you want to clear ALL booking records?\n\nThis action cannot be undone!", async () => {
                     try {
@@ -827,7 +919,8 @@
             // ⚠️ GAS Web App 的 fetch 必須用 'text/plain' Content-Type 才能跳過 CORS preflight。
             // GAS 端會自己 parse JSON。
             const callGAS = useCallback(async (action, extraData, showErrors = false) => {
-                if (!GAS_CONFIG.WEB_APP_URL || GAS_CONFIG.WEB_APP_URL === 'YOUR_WEB_APP_URL') {
+                const webAppUrl = (emailConfig.webAppUrl || GAS_CONFIG.WEB_APP_URL || '').trim();
+                if (!webAppUrl || webAppUrl === 'YOUR_WEB_APP_URL') {
                     const msg = "GAS Web App URL 未設定，跳過寄信。";
                     console.warn(msg, action);
                     if (showErrors) showAlert(`📧 ${msg}`);
@@ -839,7 +932,7 @@
                     ...extraData
                 };
                 try {
-                    const res = await fetch(GAS_CONFIG.WEB_APP_URL, {
+                    const res = await fetch(webAppUrl, {
                         method: 'POST',
                         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
                         body: JSON.stringify(payload),
@@ -873,7 +966,7 @@
                     if (showErrors) showAlert(msg);
                     return { ok: false, error: String(err) };
                 }
-            }, [showAlert]);
+            }, [showAlert, emailConfig]);
 
             // 🔧 連線測試：呼叫 GAS 的 ping 端點與 sendTestEmail 端點
             const handleTestEmailConnection = async () => {
@@ -898,7 +991,7 @@
             // slots: [{ slotId, week, dayName, periodName, slotDate }]
             // GAS 會根據 slotId 為每筆預約生成「核准 / 退回」一鍵按鈕的 URL
             const getAppBaseLink = () => {
-                const configuredUrl = (GAS_CONFIG.APP_URL || '').trim();
+                const configuredUrl = (emailConfig.appUrl || GAS_CONFIG.APP_URL || '').trim();
                 if (configuredUrl) return configuredUrl.split('?')[0].replace(/\/+$/,'');
                 return `${window.location.origin}${window.location.pathname}`;
             };
@@ -2264,10 +2357,40 @@
                                                     </div>
 
                                                     {/* === Email 連線測試 === */}
-                                                    <h3 className="text-2xl font-extrabold text-duo-text mb-6 border-b-2 border-duo-grayBorder pb-4"><i className="fa-solid fa-envelope-circle-check text-duo-blue mr-2"></i> Email 寄信模組測試</h3>
+                                                    <h3 className="text-2xl font-extrabold text-duo-text mb-6 border-b-2 border-duo-grayBorder pb-4"><i className="fa-solid fa-envelope-circle-check text-duo-blue mr-2"></i> Email 寄信模組設定</h3>
                                                     <div className="bg-duo-grayLight border-2 border-duo-grayBorder rounded-[2rem] p-6 mb-8">
+                                                        <form onSubmit={handleEmailConfigSave} className="space-y-4 mb-6">
+                                                            <div>
+                                                                <label className="block text-xs font-extrabold text-gray-500 uppercase tracking-wider mb-2">GAS Web App URL</label>
+                                                                <input
+                                                                    required
+                                                                    type="url"
+                                                                    value={tempEmailConfig.webAppUrl}
+                                                                    onChange={e => setTempEmailConfig({...tempEmailConfig, webAppUrl: e.target.value})}
+                                                                    placeholder="https://script.google.com/macros/s/.../exec"
+                                                                    className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold text-duo-text"
+                                                                />
+                                                            </div>
+                                                            <div>
+                                                                <label className="block text-xs font-extrabold text-gray-500 uppercase tracking-wider mb-2">系統公開網址 APP_URL</label>
+                                                                <input
+                                                                    type="url"
+                                                                    value={tempEmailConfig.appUrl}
+                                                                    onChange={e => setTempEmailConfig({...tempEmailConfig, appUrl: e.target.value})}
+                                                                    placeholder="https://hanyun1981.github.io/Venue-Reservation/"
+                                                                    className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold text-duo-text"
+                                                                />
+                                                            </div>
+                                                            <button type="submit" className="w-full bg-duo-green text-white font-extrabold uppercase py-3 rounded-2xl shadow-duo-green active:shadow-none active:translate-y-[4px] transition-all tracking-wider">
+                                                                <i className="fa-solid fa-floppy-disk mr-2"></i> 儲存 Email 設定
+                                                            </button>
+                                                            <button type="button" onClick={handleTestEmailUrls} className="w-full bg-white border-2 border-duo-blue text-duo-blue font-extrabold uppercase py-3 rounded-2xl shadow-duo-gray active:shadow-none active:translate-y-[4px] transition-all tracking-wider">
+                                                                <i className="fa-solid fa-link mr-2"></i> 測試網址
+                                                            </button>
+                                                        </form>
                                                         <p className="text-sm font-bold text-gray-500 mb-4 leading-relaxed">
-                                                            按下「測試連線」會：<br/>
+                                                            按下「測試網址」會檢查 GAS URL 是否能連線，並可開啟 APP_URL 確認公開網站。<br/>
+                                                            按下「測試 Email 連線」會：<br/>
                                                             ① 對 GAS 發 ping 確認連線、密鑰是否正確<br/>
                                                             ② 寄一封測試信到你的 Gmail，驗證 GmailApp 已授權<br/>
                                                             <span className="text-duo-yellowDark">⚠️ 第一次使用前，請先到 GAS 編輯器選擇 <code className="bg-white px-1.5 py-0.5 rounded">sendTestEmail</code> 函式手動執行一次，授權 Gmail 權限。</span>
@@ -2277,8 +2400,8 @@
                                                         </button>
                                                         <div className="mt-4 text-[11px] font-bold text-gray-400 leading-relaxed">
                                                             目前設定：<br/>
-                                                            • WEB_APP_URL：<span className="text-duo-blue">{GAS_CONFIG.WEB_APP_URL.length > 60 ? GAS_CONFIG.WEB_APP_URL.slice(0,60)+'...' : GAS_CONFIG.WEB_APP_URL}</span><br/>
-                                                            • APP_URL：<span className="text-duo-blue">{GAS_CONFIG.APP_URL || '使用目前網頁網址'}</span><br/>
+                                                            • WEB_APP_URL：<span className="text-duo-blue">{emailConfig.webAppUrl.length > 60 ? emailConfig.webAppUrl.slice(0,60)+'...' : emailConfig.webAppUrl}</span><br/>
+                                                            • APP_URL：<span className="text-duo-blue">{emailConfig.appUrl || '使用目前網頁網址'}</span><br/>
                                                             • API_SECRET：<span className="text-duo-blue">{GAS_CONFIG.API_SECRET.replace(/./g,'•')} ({GAS_CONFIG.API_SECRET.length} 字)</span>
                                                         </div>
                                                     </div>
