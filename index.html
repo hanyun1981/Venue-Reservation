@@ -340,22 +340,23 @@
                     // 監聽 Auth 狀態：處理頁面重整時的 session 恢復
                     fb.onAuthStateChanged(auth, async (user) => {
                         if (user && user.email) {
-                            // 已有 Google session，自動恢復登入狀態
+                            // 統一小寫，避免 Google 回傳 email 大小寫與 Firestore doc id 不一致
+                            const emailLower = (user.email || '').trim().toLowerCase();
                             // 硬編碼的 SUPER_ADMIN_EMAIL 永遠是超級管理員（即使資料庫沒有此帳號）
-                            if ((user.email || '').trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase()) {
+                            if (emailLower === SUPER_ADMIN_EMAIL.toLowerCase()) {
                                 setIsAdmin(true);
                                 setCurrentUser({ name: 'System Admin', email: SUPER_ADMIN_EMAIL, defaultClass: 'Admin', customClass: '', role: 'super_admin' });
                             } else {
                                 try {
-                                    const userDocRef = refs.getDocRef('users', user.email);
+                                    const userDocRef = refs.getDocRef('users', emailLower);
                                     const userDoc = await refs.fb.getDoc(userDocRef);
                                     if (userDoc.exists()) {
                                         const udata = userDoc.data();
                                         setCurrentUser(udata);
-                                        // role === 'super_admin' 也視為 isAdmin
                                         setIsAdmin(udata.role === 'super_admin');
                                     } else {
-                                        // 白名單中沒有此帳號，登出
+                                        // 白名單沒有此帳號（可能是大小寫問題或真的沒登錄），登出
+                                        console.warn(`Session restore: user ${emailLower} not found in whitelist`);
                                         await fb.signOut(auth);
                                     }
                                 } catch (e) {
@@ -718,18 +719,18 @@
                     const provider = new dbRefs.fb.GoogleAuthProvider();
                     provider.setCustomParameters({ prompt: 'select_account' });
                     const result = await dbRefs.fb.signInWithPopup(dbRefs.auth, provider);
-                    const userEmail = result.user.email;
+                    const userEmail = (result.user.email || '').trim().toLowerCase(); // 統一小寫
 
                     // onAuthStateChanged 會自動處理 session 恢復，
                     // 但如果白名單中沒有此帳號，需要立即登出並顯示錯誤。
-                    if ((userEmail || '').trim().toLowerCase() !== SUPER_ADMIN_EMAIL.toLowerCase()) {
+                    if (userEmail !== SUPER_ADMIN_EMAIL.toLowerCase()) {
                         const userDocRef = dbRefs.getDocRef('users', userEmail);
                         const userDoc = await dbRefs.fb.getDoc(userDocRef);
                         if (!userDoc.exists()) {
                             await dbRefs.fb.signOut(dbRefs.auth);
                             setCurrentUser(null);
                             setIsAdmin(false);
-                            showAlert(`Access Denied.\n你的 Email（${userEmail}）不在白名單中。\n請聯絡系統管理員加入後再登入。`);
+                            showAlert(`Access Denied.\n你的 Email（${userEmail}）不在白名單中。\n請聯絡系統管理員加入後再登入。\n\n💡 提示：請確認名單中的 Email 是「全小寫」，本系統一律以小寫比對。`);
                         }
                     }
                     // 如果驗證通過，onAuthStateChanged 已經設好 currentUser & isAdmin
@@ -780,27 +781,76 @@
 
             const handleAdminAddUser = async (e) => {
                 e.preventDefault();
-                const email = addUserForm.email.trim();
+                // 統一小寫 + 去前後空白，避免 Firestore doc id 與登入時查找的 key 不一致
+                const email = addUserForm.email.trim().toLowerCase();
+                if (!email.includes('@')) {
+                    return showAlert("請輸入有效的 Email 格式。");
+                }
                 try {
                     const existingDoc = await dbRefs.fb.getDoc(dbRefs.getDocRef('users', email));
                     if (existingDoc.exists()) {
                         return showAlert("此 Email 已存在白名單中！");
                     }
                     const newUser = {
-                        name: addUserForm.name.trim(), 
-                        email: email, 
-                        defaultClass: addUserForm.classType, 
+                        name: addUserForm.name.trim(),
+                        email: email,
+                        defaultClass: addUserForm.classType,
                         customClass: addUserForm.customClass,
                         role: addUserForm.role || 'user'
                     };
                     await dbRefs.fb.setDoc(dbRefs.getDocRef('users', email), newUser);
                     addLog("Add User", "System", `新增使用者：${email}（${ROLE_LABEL[newUser.role] || newUser.role}）`);
-                    showAlert("使用者已加入白名單！");
+                    showAlert(`✅ 使用者已加入白名單！\n\nEmail：${email}\n（已統一轉為小寫）`);
                     setAddUserForm({ name: '', email: '', classType: '中學部體育', customClass: '', role: 'user' });
                     setAdminAddUserModal({ isOpen: false });
                 } catch(err) {
                     console.error(err);
-                    showAlert("新增失敗，請稍後再試。");
+                    showAlert("新增失敗，請稍後再試。\n" + (err.message || err));
+                }
+            };
+
+            // 🔧 修復白名單大小寫：把所有非全小寫的 user 文件搬到全小寫的 doc id
+            // 解決：之前用大寫加進來的帳號，登入時找不到（因為登入會自動轉小寫查找）
+            const handleNormalizeUserEmails = async () => {
+                if (!isAdmin) return showAlert("只有超級管理員可以執行此操作。");
+                if (!dbRefs) return showAlert("Firebase 尚未就緒。");
+
+                const result = { renamed: [], skipped: [], failed: [] };
+
+                try {
+                    const snap = await dbRefs.fb.getDoc(dbRefs.getDocRef('users', '__placeholder__')); // dummy to ensure refs are valid
+                    // 列出所有 user
+                    const allUsers = Object.entries(usersDB);
+                    if (allUsers.length === 0) {
+                        return showAlert("目前白名單是空的，沒有需要修復的帳號。");
+                    }
+
+                    for (const [docId, udata] of allUsers) {
+                        const lower = (docId || '').trim().toLowerCase();
+                        if (lower === docId) {
+                            result.skipped.push(docId);
+                            continue;
+                        }
+                        try {
+                            // 寫入小寫版本
+                            const newData = { ...udata, email: lower };
+                            await dbRefs.fb.setDoc(dbRefs.getDocRef('users', lower), newData);
+                            // 刪除舊的（大寫版本）
+                            await dbRefs.fb.deleteDoc(dbRefs.getDocRef('users', docId));
+                            result.renamed.push(`${docId} → ${lower}`);
+                        } catch (err) {
+                            result.failed.push(`${docId}（${err.message || err}）`);
+                        }
+                    }
+
+                    let lines = ['📋 白名單修復結果\n'];
+                    if (result.renamed.length) lines.push(`✅ 已轉小寫（${result.renamed.length}）：\n${result.renamed.join('\n')}`);
+                    if (result.skipped.length) lines.push(`\nℹ️ 已是小寫無需處理（${result.skipped.length}）：\n${result.skipped.join(', ')}`);
+                    if (result.failed.length)  lines.push(`\n❌ 失敗：\n${result.failed.join('\n')}`);
+                    showAlert(lines.join('\n'));
+                } catch (err) {
+                    console.error('修復白名單失敗', err);
+                    showAlert("修復失敗：" + (err.message || err));
                 }
             };
 
@@ -2630,6 +2680,22 @@
                                                             </div>
                                                             <button type="submit" className="w-full mt-2 bg-duo-green text-white font-extrabold uppercase py-3 rounded-2xl shadow-duo-green active:shadow-none active:translate-y-[4px] transition-all tracking-wider">Save Config</button>
                                                         </form>
+                                                    </div>
+
+                                                    {/* === 修復白名單大小寫 === */}
+                                                    <h3 className="text-2xl font-extrabold text-duo-text mb-6 border-b-2 border-duo-grayBorder pb-4"><i className="fa-solid fa-screwdriver-wrench text-duo-yellow mr-2"></i> 白名單修復工具</h3>
+                                                    <div className="bg-duo-grayLight border-2 border-duo-grayBorder rounded-[2rem] p-6 mb-8">
+                                                        <p className="text-sm font-bold text-gray-500 mb-3 leading-relaxed">
+                                                            如果有人說「明明加了 user 卻無法登入」，通常是 Email 大小寫不一致 — 系統登入時會把 Email 統一轉小寫去查，但舊版加 user 時沒做同樣處理。<br/>
+                                                            按下這顆按鈕會把白名單中所有「非全小寫」的 user 文件搬到全小寫的 doc id，舊文件刪掉。
+                                                        </p>
+                                                        <button onClick={handleNormalizeUserEmails} className="w-full bg-duo-yellow text-duo-text font-extrabold uppercase py-3 rounded-2xl shadow-[0_4px_0_0_#e5b400] active:shadow-none active:translate-y-[4px] transition-all tracking-wider">
+                                                            <i className="fa-solid fa-wrench mr-2"></i> 修復白名單大小寫
+                                                        </button>
+                                                        <p className="text-[11px] font-bold text-gray-400 mt-3 leading-snug">
+                                                            ℹ️ 安全操作：只搬移不會刪資料，重複按沒副作用。<br/>
+                                                            執行完會列出哪些 Email 被轉小寫了。之後再加新 user 也會自動小寫，不需要再修了。
+                                                        </p>
                                                     </div>
 
                                                     {/* === 套用預設權限 === */}
