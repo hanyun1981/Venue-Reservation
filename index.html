@@ -117,14 +117,22 @@
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'cartreserver-app';
 
         const initialData = {
-            "活動中心": { type: "綜合場地", location: "活動中心", capacity: 200, schedule: {}, notes: "可進行球類、舞蹈、集會等活動", order: 0, managerEmails: [], registrantEmails: [] },
-            "重量訓練室": { type: "重訓室", location: "學餐對面", capacity: 20, schedule: {}, notes: "使用前請先閱讀器材安全須知", order: 1, managerEmails: [], registrantEmails: [] },
-            "地下多功能訓練室": { type: "多功能訓練室", location: "地下室", capacity: 30, schedule: {}, order: 2, managerEmails: [], registrantEmails: [] },
+            "活動中心":         { type: "綜合場地",     location: "活動中心", capacity: 200, schedule: {}, notes: "可進行球類、舞蹈、集會等活動", order: 0, managerEmails: ["gao@nehs.hc.edu.tw"],    registrantEmails: [] },
+            "重量訓練室":       { type: "重訓室",       location: "學餐對面", capacity: 20,  schedule: {}, notes: "使用前請先閱讀器材安全須知",   order: 1, managerEmails: ["hanyun@nehs.hc.edu.tw"], registrantEmails: [] },
+            "地下多功能訓練室": { type: "多功能訓練室", location: "地下室",   capacity: 30,  schedule: {},                                          order: 2, managerEmails: ["hanyun@nehs.hc.edu.tw"], registrantEmails: [] },
         };
 
         const initialUsers = {
-            "bianca@school.edu": { name: "Bianca", email: "bianca@school.edu", defaultClass: "中學部體育", customClass: "", role: "user" },
-            "yvonne@school.edu": { name: "Yvonne", email: "yvonne@school.edu", defaultClass: "雙語部體育", customClass: "", role: "user" }
+            "gao@nehs.hc.edu.tw":    { name: "Gao",     email: "gao@nehs.hc.edu.tw",    defaultClass: "中學部體育", customClass: "", role: "venue_manager" },
+            "hanyun@nehs.hc.edu.tw": { name: "Han Yun", email: "hanyun@nehs.hc.edu.tw", defaultClass: "中學部體育", customClass: "", role: "venue_manager" }
+        };
+
+        // 預設場地審核者對應表（自動套用用）
+        // 把場地名稱對應到「該場地的審核者 email 陣列」
+        const DEFAULT_VENUE_MANAGERS = {
+            "活動中心":         ["gao@nehs.hc.edu.tw"],
+            "重量訓練室":       ["hanyun@nehs.hc.edu.tw"],
+            "地下多功能訓練室": ["hanyun@nehs.hc.edu.tw"]
         };
 
         // 角色定義
@@ -440,6 +448,47 @@
 
                 return () => { unsubUsers(); };
             }, [dbRefs, isAdmin, currentUser]);
+
+            // 🔧 自動套用預設權限（只在超級管理員登入後執行一次）
+            // 規則：
+            //   • 預設使用者（initialUsers 裡的）若不存在白名單就補上去
+            //   • 場地若沒有任何審核者，就套用 DEFAULT_VENUE_MANAGERS 預設值
+            //   • 已存在的使用者 / 已有審核者的場地都不會被覆蓋（保留你後來手動的調整）
+            useEffect(() => {
+                if (!dbRefs || !isAdmin) return;
+                if (window.__defaultPermsApplied) return;
+                window.__defaultPermsApplied = true;
+
+                (async () => {
+                    try {
+                        // 補預設使用者
+                        for (const [email, userData] of Object.entries(initialUsers)) {
+                            const ref = dbRefs.getDocRef('users', email);
+                            const doc = await dbRefs.fb.getDoc(ref);
+                            if (!doc.exists()) {
+                                await dbRefs.fb.setDoc(ref, userData);
+                                console.log('[預設權限] 新增使用者：', email, '→', userData.role);
+                            }
+                        }
+
+                        // 補預設場地審核者（只在場地存在且 managerEmails 為空時）
+                        for (const [cartName, defaultManagers] of Object.entries(DEFAULT_VENUE_MANAGERS)) {
+                            const ref = dbRefs.getDocRef('carts', cartName);
+                            const doc = await dbRefs.fb.getDoc(ref);
+                            if (doc.exists()) {
+                                const data = doc.data();
+                                const current = Array.isArray(data.managerEmails) ? data.managerEmails.filter(Boolean) : [];
+                                if (current.length === 0) {
+                                    await dbRefs.fb.updateDoc(ref, { managerEmails: defaultManagers });
+                                    console.log('[預設權限] 場地指派審核者：', cartName, '→', defaultManagers.join(', '));
+                                }
+                            }
+                        }
+                    } catch (err) {
+                        console.error('[預設權限] 套用失敗：', err);
+                    }
+                })();
+            }, [dbRefs, isAdmin]);
 
             // 🔧 FIX [效能]: Logs 改為「懶載入」— 只在管理員切到 logs tab 時才訂閱
             // 原本管理員一登入就 onSnapshot 訂閱 100 筆 logs（即使在看其他 tab），
