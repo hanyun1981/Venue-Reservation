@@ -118,7 +118,7 @@
 
         const initialData = {
             "活動中心": { type: "綜合場地", location: "活動中心", capacity: 200, schedule: {}, notes: "可進行球類、舞蹈、集會等活動", order: 0, managerEmails: [], registrantEmails: [] },
-            "重量訓練室": { type: "重訓室", location: "體育館", capacity: 20, schedule: {}, notes: "使用前請先閱讀器材安全須知", order: 1, managerEmails: [], registrantEmails: [] },
+            "重量訓練室": { type: "重訓室", location: "學餐對面", capacity: 20, schedule: {}, notes: "使用前請先閱讀器材安全須知", order: 1, managerEmails: [], registrantEmails: [] },
             "地下多功能訓練室": { type: "多功能訓練室", location: "地下室", capacity: 30, schedule: {}, order: 2, managerEmails: [], registrantEmails: [] },
         };
 
@@ -151,6 +151,11 @@
         ];
 
         const baseDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+        const ACTIVITY_CENTER_NAME = "活動中心";
+        const activityCenterAreas = [
+            { id: 'stage', label: '舞台' },
+            { id: 'court', label: '球場' }
+        ];
         // 預約／登記表單的 Class/Dept 選項（按學校單位）
         const classOptions = [
             "中學部體育",
@@ -164,6 +169,26 @@
         ];
 
         const getTimestamp = () => new Date().toLocaleString('en-US', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+        const isActivityCenter = (cartName) => cartName === ACTIVITY_CENTER_NAME;
+        const getVenueAreas = (cartName) => isActivityCenter(cartName) ? activityCenterAreas : [{ id: 'main', label: '' }];
+        const getSlotAreaLabel = (areaId) => (activityCenterAreas.find(a => a.id === areaId)?.label || '');
+        const buildSlotId = (week, dayIdx, periodId, areaId = 'main') => {
+            const base = `w${week}_d${dayIdx}_p${periodId}`;
+            return areaId && areaId !== 'main' ? `${base}~${areaId}` : base;
+        };
+        const getBaseSlotId = (slotId) => String(slotId || '').split('~')[0];
+        const parseSlotId = (slotId) => {
+            const [base, areaId = 'main'] = String(slotId || '').split('~');
+            const match = base.match(/^w(\d+)_d(\d+)_p(.+)$/);
+            if (!match) return null;
+            return {
+                week: parseInt(match[1]),
+                dayIdx: parseInt(match[2]),
+                periodId: match[3],
+                areaId,
+                areaLabel: getSlotAreaLabel(areaId)
+            };
+        };
 
         function App() {
             const [firebaseReady, setFirebaseReady] = useState(false);
@@ -345,6 +370,9 @@
                 const unsubCarts = dbRefs.fb.onSnapshot(dbRefs.getCol('carts'), (snap) => {
                     const newCarts = {};
                     snap.forEach(d => { newCarts[d.id] = d.data(); });
+                    if (newCarts["重量訓練室"]) {
+                        newCarts["重量訓練室"] = { ...newCarts["重量訓練室"], location: "學餐對面" };
+                    }
 
                     // 永遠先把 Firestore 拿到的資料寫進 state（不論空不空）
                     setCartData(newCarts);
@@ -617,9 +645,9 @@
                 }
             };
 
-            // 「Email 登入」按鈕：跳出 prompt 讓使用者輸入 email
+            // 本機 / 預覽登入：跳出 prompt 讓使用者輸入白名單 email
             const handleEmailLogin = async () => {
-                const inputEmail = prompt(`【Email 登入】\n\n請輸入已加入白名單的 Email：\n(最高權限管理員請輸入 ${SUPER_ADMIN_EMAIL})`, '');
+                const inputEmail = prompt(`【白名單登入】\n\n請輸入已加入白名單的 Email：\n(最高權限管理員請輸入 ${SUPER_ADMIN_EMAIL})`, '');
                 if (inputEmail) await loginWithEmail(inputEmail);
             };
 
@@ -676,7 +704,7 @@
                     let msg;
                     switch (code) {
                         case 'auth/unauthorized-domain':
-                            msg = `❌ 未授權的網域\n\n目前網址（${window.location.origin}）尚未加入 Firebase 允許清單。\n\n修正方式：\n1. 前往 Firebase Console → Authentication → Settings → Authorized domains\n2. 加入此網域\n\n如果你只是要本機測試，請改用下方的「Email 登入」按鈕。`;
+                            msg = `❌ 未授權的網域\n\n目前網址（${window.location.origin}）尚未加入 Firebase 允許清單。\n\n修正方式：\n1. 前往 Firebase Console → Authentication → Settings → Authorized domains\n2. 加入此網域\n\n如果你只是要本機測試，請重新按登入按鈕並輸入白名單帳號。`;
                             break;
                         case 'auth/operation-not-allowed':
                             msg = `❌ Google 登入未啟用\n\n請到 Firebase Console → Authentication → Sign-in method 啟用 Google provider。`;
@@ -685,13 +713,13 @@
                             msg = `❌ 網路連線失敗\n\n請檢查你的網路後再試。`;
                             break;
                         case 'auth/popup-blocked':
-                            msg = `❌ 瀏覽器擋下了 Google 登入彈窗\n\n請允許此網站的彈窗後再試，或改用下方的「Email 登入」。`;
+                            msg = `❌ 瀏覽器擋下了 Google 登入彈窗\n\n請允許此網站的彈窗後再試。`;
                             break;
                         case 'auth/internal-error':
-                            msg = `❌ Firebase 內部錯誤\n\n可能是 Auth 設定不完整。請改用「Email 登入」，或檢查 Firebase Console 設定。`;
+                            msg = `❌ Firebase 內部錯誤\n\n可能是 Auth 設定不完整，請檢查 Firebase Console 設定。`;
                             break;
                         default:
-                            msg = `❌ Google 登入失敗\n\n錯誤代碼：${code || 'unknown'}\n${error.message || ''}\n\n如果問題持續，請改用「Email 登入」。`;
+                            msg = `❌ Google 登入失敗\n\n錯誤代碼：${code || 'unknown'}\n${error.message || ''}`;
                     }
                     showAlert(msg);
                 }
@@ -873,8 +901,13 @@
                         const schedule = cartDoc.data().schedule || {};
                         let changed = false;
                         for (let w = lockData.startWeek; w < lockData.startWeek + lockData.weeks; w++) {
-                            const slotId = `w${w}_d${lockData.dayIdx}_p${lockData.periodId}`;
-                            if (schedule[slotId]) { delete schedule[slotId]; changed = true; }
+                            const baseSlotId = buildSlotId(w, lockData.dayIdx, lockData.periodId);
+                            Object.keys(schedule).forEach(slotId => {
+                                if (getBaseSlotId(slotId) === baseSlotId) {
+                                    delete schedule[slotId];
+                                    changed = true;
+                                }
+                            });
                         }
                         if (changed) transaction.update(cartRef, { schedule });
                     });
@@ -1042,7 +1075,7 @@
                 return list.some(e => (e || '').trim().toLowerCase() === myEmail);
             }, [isAdmin, cartData, currentUser]);
 
-            const handleSlotClick = (dayIdx, periodId, existingBooking) => {
+            const handleSlotClick = (dayIdx, periodId, existingBooking, areaId = 'main') => {
                 const lock = getLockForSlot(selectedCart, selectedWeek, dayIdx, periodId);
                 if (lock) {
                     showAlert(`🔒 此時段已被鎖定\n\n名稱：${lock.name}\n期間：第 ${lock.startWeek} - ${lock.startWeek + lock.weeks - 1} 週`);
@@ -1058,7 +1091,7 @@
                 }
 
                 if (existingBooking) {
-                    setBookingModal({ isOpen: true, dayIdx, periodId, existingBooking, isEditing: false, isBatch: false, isPast: isPastSlot });
+                    setBookingModal({ isOpen: true, dayIdx, periodId, areaId, existingBooking, isEditing: false, isBatch: false, isPast: isPastSlot });
                 } else {
                     if (isPastSlot && !isAdmin) {
                         showAlert("⚠️ Cannot book slots in the past!");
@@ -1072,15 +1105,15 @@
                     }
 
                     if (isBatchMode) {
-                        const slotId = `w${selectedWeek}_d${dayIdx}_p${periodId}`;
+                        const slotId = buildSlotId(selectedWeek, dayIdx, periodId, areaId);
                         setBatchSelection(prev => 
                             prev.some(s => s.slotId === slotId) 
                                 ? prev.filter(s => s.slotId !== slotId) 
-                                : [...prev, { dayIdx, periodId, slotId }]
+                                : [...prev, { dayIdx, periodId, areaId, slotId }]
                         );
                     } else {
                         setBookForm({ classType: currentUser.defaultClass, customClass: currentUser.customClass });
-                        setBookingModal({ isOpen: true, dayIdx, periodId, existingBooking: null, isEditing: false, isBatch: false, isPast: false });
+                        setBookingModal({ isOpen: true, dayIdx, periodId, areaId, existingBooking: null, isEditing: false, isBatch: false, isPast: false });
                     }
                 }
             };
@@ -1119,6 +1152,8 @@
                             currentSchedule[slot.slotId] = {
                                 name: currentUser.name, email: currentUser.email, 
                                 className: finalClass, ownerEmail: currentUser.email,
+                                areaId: slot.areaId || 'main',
+                                areaLabel: getSlotAreaLabel(slot.areaId),
                                 status: initialStatus,
                                 createdAt: Date.now()
                             };
@@ -1127,7 +1162,7 @@
                     });
 
                     const details = slotsToBook.length === 1 
-                        ? `Week ${selectedWeek} ${currentDays[slotsToBook[0].dayIdx]} P${slotsToBook[0].periodId} (${finalClass}) [${initialStatus}]`
+                        ? `Week ${selectedWeek} ${currentDays[slotsToBook[0].dayIdx]} P${slotsToBook[0].periodId}${getSlotAreaLabel(slotsToBook[0].areaId) ? ` ${getSlotAreaLabel(slotsToBook[0].areaId)}` : ''} (${finalClass}) [${initialStatus}]`
                         : `Batch booked ${slotsToBook.length} slots for Week ${selectedWeek} (${finalClass}) [${initialStatus}]`;
                     
                     addLog("Add Booking", selectedCart, details);
@@ -1150,7 +1185,7 @@
                                     slotId: slot.slotId,
                                     week: selectedWeek,
                                     dayName: currentDays[slot.dayIdx],
-                                    periodName: pinfo ? pinfo.name : `Period ${slot.periodId}`,
+                                    periodName: `${pinfo ? pinfo.name : `Period ${slot.periodId}`}${getSlotAreaLabel(slot.areaId) ? ` · ${getSlotAreaLabel(slot.areaId)}` : ''}`,
                                     slotDate: getDateForDayIdx(selectedWeek, slot.dayIdx)
                                 };
                             })
@@ -1169,11 +1204,19 @@
 
             const checkConflictsAndSubmit = async () => {
                 const finalClass = bookForm.classType === 'Other (Specify)' ? bookForm.customClass : bookForm.classType;
-                const slotsToBook = bookingModal.isBatch ? batchSelection : [{ dayIdx: bookingModal.dayIdx, periodId: bookingModal.periodId, slotId: `w${selectedWeek}_d${bookingModal.dayIdx}_p${bookingModal.periodId}` }];
+                const slotsToBook = bookingModal.isBatch ? batchSelection : [{
+                    dayIdx: bookingModal.dayIdx,
+                    periodId: bookingModal.periodId,
+                    areaId: bookingModal.areaId || 'main',
+                    slotId: buildSlotId(selectedWeek, bookingModal.dayIdx, bookingModal.periodId, bookingModal.areaId || 'main')
+                }];
                 
                 const conflictingSlots = slotsToBook.filter(slot => {
                     return Object.entries(cartData).some(([cName, cData]) => {
-                        return cName !== selectedCart && cData.schedule && cData.schedule[slot.slotId]?.className === finalClass;
+                        if (cName === selectedCart || !cData.schedule) return false;
+                        return Object.entries(cData.schedule).some(([otherSlotId, info]) =>
+                            getBaseSlotId(otherSlotId) === getBaseSlotId(slot.slotId) && info?.className === finalClass
+                        );
                     });
                 });
 
@@ -1223,21 +1266,21 @@
                         }
                     });
 
-                    const match = slotId.match(/w(\d+)_d(\d+)_p(\w+)/);
-                    const detailStr = match ? `W${match[1]} ${currentDays[parseInt(match[2])]} P${match[3]} (${bookingDetail?.name})` : slotId;
+                    const slotParts = parseSlotId(slotId);
+                    const detailStr = slotParts ? `W${slotParts.week} ${currentDays[slotParts.dayIdx]} P${slotParts.periodId}${slotParts.areaLabel ? ` ${slotParts.areaLabel}` : ''} (${bookingDetail?.name})` : slotId;
                     addLog(decision === 'approved' ? "Approve Booking" : "Reject Booking", cartName, detailStr);
 
                     // 🔧 寄結果信：申請人 + 該場地所有可登記者 + 該場地所有審核者
-                    if (bookingDetail && match) {
+                    if (bookingDetail && slotParts) {
                         const cartInfo = cartData[cartName] || {};
                         const allManagers = Array.from(new Set([SUPER_ADMIN_EMAIL, ...(Array.isArray(cartInfo.managerEmails) ? cartInfo.managerEmails : [])]
                             .filter(Boolean)
                             .map(e => String(e).trim().toLowerCase())
                         ));
                         const allRegistrants = Array.isArray(cartInfo.registrantEmails) ? cartInfo.registrantEmails : [];
-                        const week = parseInt(match[1]);
-                        const dayIdx = parseInt(match[2]);
-                        const periodId = match[3];
+                        const week = slotParts.week;
+                        const dayIdx = slotParts.dayIdx;
+                        const periodId = slotParts.periodId;
                         const periodInfo = periods.find(p => String(p.id) === String(periodId));
                         sendReviewResultEmail({
                             decision,
@@ -1251,7 +1294,7 @@
                             className: bookingDetail.className,
                             week,
                             dayName: currentDays[dayIdx],
-                            periodName: periodInfo ? periodInfo.name : `Period ${periodId}`,
+                            periodName: `${periodInfo ? periodInfo.name : `Period ${periodId}`}${slotParts.areaLabel ? ` · ${slotParts.areaLabel}` : ''}`,
                             slotDate: getDateForDayIdx(week, dayIdx)
                         });
                     }
@@ -1314,11 +1357,12 @@
                     const sch = data.schedule || {};
                     Object.entries(sch).forEach(([slotId, info]) => {
                         if (info.status === 'pending') {
-                            const m = slotId.match(/w(\d+)_d(\d+)_p(\w+)/);
-                            if (m) {
+                            const slotParts = parseSlotId(slotId);
+                            if (slotParts) {
                                 result.push({
                                     cartName, slotId, info,
-                                    week: parseInt(m[1]), dayIdx: parseInt(m[2]), periodId: m[3]
+                                    week: slotParts.week, dayIdx: slotParts.dayIdx, periodId: slotParts.periodId,
+                                    areaId: slotParts.areaId, areaLabel: slotParts.areaLabel
                                 });
                             }
                         }
@@ -1338,7 +1382,7 @@
             // 已被取消時給予明確的錯誤訊息而不是靜默失敗。
             // =================================================================
             const cancelBooking = async () => {
-                const slotId = `w${selectedWeek}_d${bookingModal.dayIdx}_p${bookingModal.periodId}`;
+                const slotId = buildSlotId(selectedWeek, bookingModal.dayIdx, bookingModal.periodId, bookingModal.areaId || bookingModal.existingBooking?.areaId || 'main');
                 const cartRef = dbRefs.getDocRef('carts', selectedCart);
                 
                 try {
@@ -1361,7 +1405,8 @@
                     });
 
                     const actionName = isAdmin ? "Force Cancel" : "Cancel Booking";
-                    addLog(actionName, selectedCart, `Week ${selectedWeek} ${currentDays[bookingModal.dayIdx]} P${bookingModal.periodId} (${cancelledName})`);
+                    const areaLabel = getSlotAreaLabel(bookingModal.areaId || bookingModal.existingBooking?.areaId);
+                    addLog(actionName, selectedCart, `Week ${selectedWeek} ${currentDays[bookingModal.dayIdx]} P${bookingModal.periodId}${areaLabel ? ` ${areaLabel}` : ''} (${cancelledName})`);
                 } catch (error) {
                     if (error === "ALREADY_CANCELLED") showAlert("這筆預約已經被取消了。");
                     else if (error === "NOT_OWNER") showAlert("你只能取消自己的預約。");
@@ -1384,7 +1429,7 @@
             };
 
             const updateBooking = async () => {
-                const slotId = `w${selectedWeek}_d${bookingModal.dayIdx}_p${bookingModal.periodId}`;
+                const slotId = buildSlotId(selectedWeek, bookingModal.dayIdx, bookingModal.periodId, bookingModal.areaId || bookingModal.existingBooking?.areaId || 'main');
                 const finalClass = editBookForm.classType === 'Other (Specify)' ? editBookForm.customClass : editBookForm.classType;
                 const cartRef = dbRefs.getDocRef('carts', selectedCart);
                 
@@ -1511,13 +1556,15 @@
                     if (data.schedule) {
                         Object.entries(data.schedule).forEach(([slotId, bookingInfo]) => {
                             if (bookingInfo.ownerEmail === currentUser.email) {
-                                const match = slotId.match(/w(\d+)_d(\d+)_p(\w+)/);
-                                if (match) {
+                                const slotParts = parseSlotId(slotId);
+                                if (slotParts) {
                                     myBookings.push({
                                         cartName,
-                                        week: parseInt(match[1]),
-                                        dayIdx: parseInt(match[2]),
-                                        periodId: match[3],
+                                        week: slotParts.week,
+                                        dayIdx: slotParts.dayIdx,
+                                        periodId: slotParts.periodId,
+                                        areaId: slotParts.areaId,
+                                        areaLabel: slotParts.areaLabel,
                                         slotId,
                                         className: bookingInfo.className,
                                         status: bookingInfo.status || 'approved'
@@ -1557,8 +1604,8 @@
                             transaction.update(cartRef, { schedule: currentSchedule });
                         });
                         
-                        const match = slotId.match(/w(\d+)_d(\d+)_p(\w+)/);
-                        if (match) addLog("Cancel Booking", cartName, `W${match[1]} ${currentDays[parseInt(match[2])]} P${match[3]} (${className})`);
+                        const slotParts = parseSlotId(slotId);
+                        if (slotParts) addLog("Cancel Booking", cartName, `W${slotParts.week} ${currentDays[slotParts.dayIdx]} P${slotParts.periodId}${slotParts.areaLabel ? ` ${slotParts.areaLabel}` : ''} (${className})`);
                     } catch (error) {
                         if (error === "ALREADY_CANCELLED") showAlert("這筆預約已經被取消了。");
                         else if (error === "NOT_OWNER") showAlert("你只能取消自己的預約。");
@@ -1639,27 +1686,18 @@
                                     <div className="text-center">
                                         <p className="text-sm font-bold text-gray-500 mb-6">
                                             {useEmailOnlyLogin
-                                                ? '預覽 / 本機環境，請使用 Email 登入。'
+                                                ? '預覽 / 本機環境，請按下方登入按鈕。'
                                                 : '請使用授權的 Google 帳號登入。'}
                                         </p>
 
                                         {/* Google 登入按鈕（預覽環境會自動 fallback 為 email prompt） */}
                                         <button onClick={handleGoogleLogin} className="w-full bg-white text-duo-text border-2 border-duo-grayBorder font-extrabold uppercase py-4 rounded-2xl shadow-[0_4px_0_0_#e5e5e5] hover:bg-gray-50 hover:border-gray-300 active:shadow-none active:translate-y-[4px] transition-all tracking-wider text-lg flex items-center justify-center">
-                                            <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-6 h-6 mr-3" />
-                                            Sign in with Google
-                                        </button>
-
-                                        {/* 分隔線 */}
-                                        <div className="flex items-center my-4 gap-3">
-                                            <div className="flex-1 h-[2px] bg-duo-grayBorder"></div>
-                                            <span className="text-xs font-extrabold text-gray-400 uppercase tracking-widest">或</span>
-                                            <div className="flex-1 h-[2px] bg-duo-grayBorder"></div>
-                                        </div>
-
-                                        {/* Email 登入按鈕（永遠可用，方便預覽或 Google OAuth 失敗時使用） */}
-                                        <button onClick={handleEmailLogin} className="w-full bg-duo-blue text-white font-extrabold uppercase py-4 rounded-2xl shadow-[0_4px_0_0_#1899d6] hover:bg-[#1aa0e0] active:shadow-none active:translate-y-[4px] transition-all tracking-wider text-lg flex items-center justify-center">
-                                            <i className="fa-solid fa-envelope mr-3"></i>
-                                            使用 Email 登入
+                                            {useEmailOnlyLogin ? (
+                                                <i className="fa-solid fa-right-to-bracket text-duo-blue text-xl mr-3"></i>
+                                            ) : (
+                                                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="w-6 h-6 mr-3" />
+                                            )}
+                                            {useEmailOnlyLogin ? '登入' : 'Sign in with Google'}
                                         </button>
 
                                         {useEmailOnlyLogin && (
@@ -1668,7 +1706,7 @@
                                                     <i className="fa-solid fa-info-circle mr-1"></i>
                                                     偵測到目前環境為 <span className="font-extrabold">{_proto || 'preview'}</span>，
                                                     Firebase 的 Google OAuth 在此環境下無法運作。<br/>
-                                                    請使用「Email 登入」直接以白名單帳號登入。
+                                                    按上方登入按鈕後，請輸入白名單帳號。
                                                 </p>
                                             </div>
                                         )}
@@ -1816,7 +1854,7 @@
                                                         </div>
                                                         <div className="text-sm font-bold text-gray-500 mb-3 leading-relaxed">
                                                             <div><i className="fa-solid fa-user mr-2 text-gray-400"></i>{p.info.name} <span className="text-xs text-gray-400">({p.info.email})</span></div>
-                                                            <div><i className="fa-regular fa-calendar mr-2 text-gray-400"></i>第 {p.week} 週 {currentDays[p.dayIdx]} {periodInfo ? periodInfo.name : `P${p.periodId}`}</div>
+                                                            <div><i className="fa-regular fa-calendar mr-2 text-gray-400"></i>第 {p.week} 週 {currentDays[p.dayIdx]} {periodInfo ? periodInfo.name : `P${p.periodId}`}{p.areaLabel ? ` · ${p.areaLabel}` : ''}</div>
                                                         </div>
                                                         <div className="flex gap-2 mt-auto">
                                                             <button onClick={() => reviewBooking(p.cartName, p.slotId, 'rejected')} className="flex-1 bg-white border-2 border-duo-red text-duo-red font-extrabold uppercase py-2 rounded-xl text-sm shadow-[0_3px_0_0_#ea2b2b] active:shadow-none active:translate-y-[3px] transition-all">
@@ -1914,6 +1952,12 @@
                                                                         <span className="text-duo-text">{targetPeriod ? targetPeriod.name : `Period ${b.periodId}`}</span>
                                                                         <span className="text-xs ml-2">({targetPeriod ? targetPeriod.time : ''})</span>
                                                                     </div>
+                                                                    {b.areaLabel && (
+                                                                        <div className="flex items-center text-sm font-bold text-gray-500">
+                                                                            <div className="w-6"><i className="fa-solid fa-border-all text-gray-400"></i></div>
+                                                                            <span className="text-duo-text">{b.areaLabel}</span>
+                                                                        </div>
+                                                                    )}
                                                                 </div>
 
                                                                 {myBookingsTab === 'upcoming' ? (
@@ -1958,19 +2002,26 @@
                                                                     </div>
                                                                 </td>
                                                                 {currentDays.map((day, dayIdx) => {
-                                                                    const slotId = `w${selectedWeek}_d${dayIdx}_p${period.id}`;
-                                                                    const myCartsThisSlot = Object.entries(cartData).filter(([cName, cData]) => cData.schedule && cData.schedule[slotId]?.ownerEmail === currentUser.email);
+                                                                    const baseSlotId = buildSlotId(selectedWeek, dayIdx, period.id);
+                                                                    const myCartsThisSlot = [];
+                                                                    Object.entries(cartData).forEach(([cName, cData]) => {
+                                                                        Object.entries(cData.schedule || {}).forEach(([slotId, booking]) => {
+                                                                            if (getBaseSlotId(slotId) === baseSlotId && booking.ownerEmail === currentUser.email) {
+                                                                                myCartsThisSlot.push({ cName, slotId, booking, areaLabel: parseSlotId(slotId)?.areaLabel || '' });
+                                                                            }
+                                                                        });
+                                                                    });
                                                                     
                                                                     return (
                                                                         <td key={dayIdx} className="p-2 align-middle text-center relative">
                                                                             {myCartsThisSlot.length > 0 ? (
                                                                                 <div className="flex flex-col gap-1">
-                                                                                    {myCartsThisSlot.map(([cName, cData]) => {
-                                                                                        const stat = cData.schedule[slotId].status;
+                                                                                    {myCartsThisSlot.map(({ cName, slotId, booking, areaLabel }) => {
+                                                                                        const stat = booking.status;
                                                                                         const isPending = stat === 'pending';
                                                                                         return (
-                                                                                            <div key={cName} className={`${isPending ? 'bg-duo-yellow shadow-[0_3px_0_0_#e5b400] hover:bg-[#e5b400]' : 'bg-duo-green shadow-[0_3px_0_0_#58a700] hover:bg-[#46a302]'} text-white rounded-xl p-2 flex flex-col justify-center items-center cursor-pointer active:translate-y-[3px] active:shadow-none`} onClick={() => cancelBookingFromList(cName, slotId, cData.schedule[slotId].className)}>
-                                                                                                <span className="font-extrabold text-xs truncate w-full">{cName}</span>
+                                                                                            <div key={`${cName}-${slotId}`} className={`${isPending ? 'bg-duo-yellow shadow-[0_3px_0_0_#e5b400] hover:bg-[#e5b400]' : 'bg-duo-green shadow-[0_3px_0_0_#58a700] hover:bg-[#46a302]'} text-white rounded-xl p-2 flex flex-col justify-center items-center cursor-pointer active:translate-y-[3px] active:shadow-none`} onClick={() => cancelBookingFromList(cName, slotId, booking.className)}>
+                                                                                                <span className="font-extrabold text-xs truncate w-full">{cName}{areaLabel ? ` · ${areaLabel}` : ''}</span>
                                                                                                 <span className="text-[10px] bg-black/20 px-1.5 rounded-md truncate">
                                                                                                     {isPending ? (
                                                                                                         <><i className="fa-solid fa-hourglass-half mr-1"></i>審核中</>
@@ -2175,11 +2226,12 @@
                                                         </td>
                                                         
                                                         {currentDays.map((day, dayIdx) => {
-                                                            const slotId = `w${selectedWeek}_d${dayIdx}_p${period.id}`;
+                                                            const slotId = buildSlotId(selectedWeek, dayIdx, period.id);
                                                             const bookingInfo = cartData[selectedCart]?.schedule?.[slotId];
                                                             const isMyBooking = bookingInfo && bookingInfo.ownerEmail === currentUser.email;
                                                             const isSelectedBatch = batchSelection.some(s => s.slotId === slotId);
                                                             const slotLock = getLockForSlot(selectedCart, selectedWeek, dayIdx, period.id);
+                                                            const venueAreas = getVenueAreas(selectedCart);
 
                                                             return (
                                                                 <td key={dayIdx} className="p-2 align-middle">
@@ -2191,6 +2243,50 @@
                                                                         >
                                                                             <i className="fa-solid fa-lock text-base mb-1"></i>
                                                                             <span className="font-extrabold text-xs truncate w-full text-center leading-tight">{slotLock.name}</span>
+                                                                        </div>
+                                                                    ) : isActivityCenter(selectedCart) && !bookingInfo ? (
+                                                                        <div className="grid grid-cols-2 gap-1 h-[72px]">
+                                                                            {venueAreas.map(area => {
+                                                                                const areaSlotId = buildSlotId(selectedWeek, dayIdx, period.id, area.id);
+                                                                                const areaBooking = cartData[selectedCart]?.schedule?.[areaSlotId];
+                                                                                const areaIsMyBooking = areaBooking && areaBooking.ownerEmail === currentUser.email;
+                                                                                const areaIsSelectedBatch = batchSelection.some(s => s.slotId === areaSlotId);
+                                                                                return areaBooking ? (
+                                                                                    <div
+                                                                                        key={area.id}
+                                                                                        onClick={() => (!isBatchMode && (areaIsMyBooking || isAdmin || canApproveCart(selectedCart))) && handleSlotClick(dayIdx, period.id, areaBooking, area.id)}
+                                                                                        className={`rounded-xl flex flex-col items-center justify-center px-1.5 py-1 transition-all min-w-0 ${
+                                                                                            isBatchMode ? 'bg-gray-100 text-gray-400 border-2 border-duo-grayBorder opacity-50 cursor-not-allowed' :
+                                                                                            areaBooking.status === 'pending'
+                                                                                                ? 'bg-duo-yellow text-white shadow-[0_3px_0_0_#e5b400] cursor-pointer hover:bg-[#e5b400] active:shadow-none active:translate-y-[3px]'
+                                                                                                : (areaIsMyBooking || isAdmin || canApproveCart(selectedCart))
+                                                                                                    ? 'bg-duo-green text-white shadow-[0_3px_0_0_#58a700] cursor-pointer hover:bg-[#46a302] active:shadow-none active:translate-y-[3px]'
+                                                                                                    : 'bg-gray-100 text-gray-400 border-2 border-duo-grayBorder cursor-not-allowed opacity-80'
+                                                                                        }`}
+                                                                                    >
+                                                                                        <div className="text-[10px] font-extrabold leading-none mb-0.5">{area.label}</div>
+                                                                                        <i className={`fa-solid ${areaBooking.status === 'pending' ? 'fa-hourglass-half' : 'fa-circle-check'} text-xs`}></i>
+                                                                                        <span className="font-extrabold text-[10px] truncate w-full text-center leading-tight mt-0.5">{areaBooking.name}</span>
+                                                                                    </div>
+                                                                                ) : (
+                                                                                    <div
+                                                                                        key={area.id}
+                                                                                        onClick={() => handleSlotClick(dayIdx, period.id, null, area.id)}
+                                                                                        className={`rounded-xl flex flex-col items-center justify-center px-1.5 py-1 cursor-pointer transition-all group min-w-0 ${
+                                                                                            areaIsSelectedBatch
+                                                                                                ? 'bg-duo-green/20 border-2 border-duo-green text-duo-greenDark shadow-[inset_0_0_0_1px_#58cc02]'
+                                                                                                : 'bg-transparent border-2 border-dashed border-gray-300 text-gray-400 hover:bg-duo-green/10 hover:border-duo-green hover:text-duo-green'
+                                                                                        }`}
+                                                                                    >
+                                                                                        <span className="text-[10px] font-extrabold leading-tight truncate w-full text-center">{area.label}</span>
+                                                                                        {areaIsSelectedBatch ? (
+                                                                                            <i className="fa-solid fa-check text-base text-duo-green mt-0.5"></i>
+                                                                                        ) : (
+                                                                                            <i className="fa-solid fa-plus text-sm mt-0.5 opacity-60 group-hover:opacity-100 transition-opacity"></i>
+                                                                                        )}
+                                                                                    </div>
+                                                                                );
+                                                                            })}
                                                                         </div>
                                                                     ) : bookingInfo ? (
                                                                         <div onClick={() => (!isBatchMode && (isMyBooking || isAdmin || canApproveCart(selectedCart))) && handleSlotClick(dayIdx, period.id, bookingInfo)}
@@ -2328,7 +2424,7 @@
                                                             <tr>
                                                                 <th className="p-4 text-xs font-extrabold text-gray-400 uppercase tracking-wider">姓名</th>
                                                                 <th className="p-4 text-xs font-extrabold text-gray-400 uppercase tracking-wider">Google Email</th>
-                                                                <th className="p-4 text-xs font-extrabold text-gray-400 uppercase tracking-wider">預設班級</th>
+                                                                <th className="p-4 text-xs font-extrabold text-gray-400 uppercase tracking-wider">登記者</th>
                                                                 <th className="p-4 text-xs font-extrabold text-gray-400 uppercase tracking-wider">角色</th>
                                                                 <th className="p-4 text-right text-xs font-extrabold text-gray-400 uppercase tracking-wider">操作</th>
                                                             </tr>
@@ -2587,7 +2683,10 @@
                     <span className="text-[10px] text-gray-600">{period.time}</span>
                 </td>
                 {currentDays.map((day, dayIdx) => {
-                    const booking = cartData[cartName]?.schedule?.[`w${selectedWeek}_d${dayIdx}_p${period.id}`];
+                    const baseSlotId = buildSlotId(selectedWeek, dayIdx, period.id);
+                    const bookings = Object.entries(cartData[cartName]?.schedule || {})
+                        .filter(([slotId]) => getBaseSlotId(slotId) === baseSlotId)
+                        .map(([slotId, info]) => ({ ...info, areaLabel: parseSlotId(slotId)?.areaLabel || info.areaLabel || '' }));
                     const printLock = getLockForSlot(cartName, selectedWeek, dayIdx, period.id);
 
                     return (
@@ -2597,11 +2696,14 @@
                                     <div>
                                         <strong className="text-[12px]">🔒 {printLock.name}</strong>
                                     </div>
-                                ) : booking ? (
-                                    <div>
-                                        <span className="text-[10px] text-gray-600">{booking.className}</span><br/>
-                                        <strong className="text-[12px]">{booking.name}</strong>
-                                    </div>
+                                ) : bookings.length > 0 ? (
+                                    bookings.map((booking, i) => (
+                                        <div key={i} className={i > 0 ? 'mt-1 pt-1 border-t border-gray-300' : ''}>
+                                            {booking.areaLabel && <span className="text-[10px] font-bold text-gray-700">[{booking.areaLabel}] </span>}
+                                            <span className="text-[10px] text-gray-600">{booking.className}</span><br/>
+                                            <strong className="text-[12px]">{booking.name}</strong>
+                                        </div>
+                                    ))
                                 ) : ""}
                             </td>
                             <td></td>
@@ -2646,7 +2748,7 @@
                                             ))}
                                         </select>
                                     </div>
-                                    <div><label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">預設班級</label><select value={addUserForm.classType} onChange={e => setAddUserForm({...addUserForm, classType: e.target.value})} className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold">{classOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}</select></div>
+                                    <div><label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">登記者</label><select value={addUserForm.classType} onChange={e => setAddUserForm({...addUserForm, classType: e.target.value})} className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold">{classOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}</select></div>
                                     {addUserForm.classType === 'Other (Specify)' && <input required type="text" value={addUserForm.customClass} onChange={e => setAddUserForm({...addUserForm, customClass: e.target.value})} placeholder="自訂班級／單位" className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold" />}
                                     <div className="flex gap-3 pt-4 border-t-2 border-duo-grayBorder mt-4">
                                         <button type="button" onClick={() => setAdminAddUserModal({ isOpen: false })} className="flex-1 bg-white border-2 border-duo-grayBorder text-gray-400 font-extrabold uppercase py-3 rounded-2xl shadow-duo-gray active:shadow-none active:translate-y-[4px] transition-all">取消</button>
@@ -2675,7 +2777,7 @@
                                         <span className="text-xs text-duo-blue/70">
                                             {bookingModal.isBatch 
                                                 ? `Wk ${selectedWeek} • Booking ${batchSelection.length} Slots`
-                                                : `Wk ${selectedWeek} • ${currentDays[bookingModal.dayIdx]} • P${bookingModal.periodId}`
+                                                : `Wk ${selectedWeek} • ${currentDays[bookingModal.dayIdx]} • P${bookingModal.periodId}${getSlotAreaLabel(bookingModal.areaId || bookingModal.existingBooking?.areaId) ? ` • ${getSlotAreaLabel(bookingModal.areaId || bookingModal.existingBooking?.areaId)}` : ''}`
                                             }
                                         </span>
                                     </div>
@@ -2698,6 +2800,12 @@
                                                 </div>
                                                 <div className="font-extrabold text-duo-text text-2xl mb-1">{bookingModal.existingBooking.name}</div>
                                                 <div className="font-bold text-gray-400 bg-gray-100 inline-block px-3 py-1 rounded-lg text-sm mb-3">{bookingModal.existingBooking.className}</div>
+                                                {(bookingModal.existingBooking.areaLabel || getSlotAreaLabel(bookingModal.areaId || bookingModal.existingBooking.areaId)) && (
+                                                    <div className="font-extrabold text-duo-blue bg-blue-50 border-2 border-blue-100 inline-block px-3 py-1 rounded-lg text-xs mb-3">
+                                                        <i className="fa-solid fa-border-all mr-1"></i>
+                                                        {bookingModal.existingBooking.areaLabel || getSlotAreaLabel(bookingModal.areaId || bookingModal.existingBooking.areaId)}
+                                                    </div>
+                                                )}
                                                 
                                                 {/* 狀態徽章 */}
                                                 <div className="mb-6">
@@ -2717,7 +2825,7 @@
                                                     <div className="flex gap-3 mb-3">
                                                         <button
                                                             onClick={() => {
-                                                                const slotId = `w${selectedWeek}_d${bookingModal.dayIdx}_p${bookingModal.periodId}`;
+                                                                const slotId = buildSlotId(selectedWeek, bookingModal.dayIdx, bookingModal.periodId, bookingModal.areaId || bookingModal.existingBooking?.areaId || 'main');
                                                                 reviewBooking(selectedCart, slotId, 'rejected');
                                                                 setBookingModal({ isOpen: false });
                                                             }}
@@ -2726,7 +2834,7 @@
                                                         </button>
                                                         <button
                                                             onClick={() => {
-                                                                const slotId = `w${selectedWeek}_d${bookingModal.dayIdx}_p${bookingModal.periodId}`;
+                                                                const slotId = buildSlotId(selectedWeek, bookingModal.dayIdx, bookingModal.periodId, bookingModal.areaId || bookingModal.existingBooking?.areaId || 'main');
                                                                 reviewBooking(selectedCart, slotId, 'approved');
                                                                 setBookingModal({ isOpen: false });
                                                             }}
@@ -2784,7 +2892,7 @@
                                         <div><label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">類型</label><select name="type" defaultValue={editCartModal.data?.type || '綜合場地'} className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold"><option value="綜合場地">綜合場地</option><option value="重訓室">重訓室</option><option value="多功能訓練室">多功能訓練室</option><option value="其他">其他</option></select></div>
                                         <div><label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">容納人數</label><input required type="number" name="capacity" defaultValue={editCartModal.data?.capacity || 30} min="1" className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold" /></div>
                                     </div>
-                                    <div><label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">位置</label><input required name="location" defaultValue={editCartModal.data?.location || ''} placeholder="例如：體育館 / 地下室" className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold" /></div>
+                                    <div><label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">位置</label><input required name="location" defaultValue={editCartModal.data?.location || ''} placeholder="例如：學餐對面 / 地下室" className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold" /></div>
                                     {/* === 場地登記者 === */}
                                     <div>
                                         <label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">
