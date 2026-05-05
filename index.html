@@ -1050,6 +1050,80 @@
                 }
             }, [showAlert, emailConfig]);
 
+            // 🔧 手動套用預設權限（按鈕觸發版，逐筆顯示結果）
+            // 自動 effect 跑過會被 window.__defaultPermsApplied 鎖住，
+            // 這個函式會強制重新跑一次，並把每筆操作結果明確列出來給管理員確認。
+            const handleApplyDefaultPermissions = async () => {
+                if (!isAdmin) {
+                    showAlert("只有超級管理員可以執行此操作。");
+                    return;
+                }
+                if (!dbRefs) {
+                    showAlert("Firebase 尚未就緒。");
+                    return;
+                }
+
+                const report = {
+                    usersAdded: [], usersExist: [], usersFailed: [],
+                    cartsUpdated: [], cartsSkipped: [], cartsMissing: [], cartsFailed: []
+                };
+
+                // 1. 補預設使用者
+                for (const [email, userData] of Object.entries(initialUsers)) {
+                    try {
+                        const ref = dbRefs.getDocRef('users', email);
+                        const doc = await dbRefs.fb.getDoc(ref);
+                        if (!doc.exists()) {
+                            await dbRefs.fb.setDoc(ref, userData);
+                            report.usersAdded.push(email);
+                        } else {
+                            report.usersExist.push(email);
+                        }
+                    } catch (err) {
+                        console.error('套用使用者失敗', email, err);
+                        report.usersFailed.push(`${email}（${err.message || err}）`);
+                    }
+                }
+
+                // 2. 補預設場地審核者
+                for (const [cartName, defaultManagers] of Object.entries(DEFAULT_VENUE_MANAGERS)) {
+                    try {
+                        const ref = dbRefs.getDocRef('carts', cartName);
+                        const doc = await dbRefs.fb.getDoc(ref);
+                        if (!doc.exists()) {
+                            report.cartsMissing.push(cartName);
+                            continue;
+                        }
+                        const data = doc.data();
+                        const current = Array.isArray(data.managerEmails) ? data.managerEmails.filter(Boolean) : [];
+                        if (current.length === 0) {
+                            await dbRefs.fb.updateDoc(ref, { managerEmails: defaultManagers });
+                            report.cartsUpdated.push(`${cartName} → ${defaultManagers.join(', ')}`);
+                        } else {
+                            report.cartsSkipped.push(`${cartName}（已有審核者：${current.join(', ')}）`);
+                        }
+                    } catch (err) {
+                        console.error('套用場地失敗', cartName, err);
+                        report.cartsFailed.push(`${cartName}（${err.message || err}）`);
+                    }
+                }
+
+                // 把結果顯示出來
+                let lines = ['📋 套用結果\n'];
+                lines.push(`【使用者】`);
+                if (report.usersAdded.length)  lines.push(`✅ 新增：${report.usersAdded.join(', ')}`);
+                if (report.usersExist.length)  lines.push(`ℹ️ 已存在：${report.usersExist.join(', ')}`);
+                if (report.usersFailed.length) lines.push(`❌ 失敗：\n${report.usersFailed.join('\n')}`);
+
+                lines.push(`\n【場地審核者】`);
+                if (report.cartsUpdated.length) lines.push(`✅ 已指派：\n${report.cartsUpdated.join('\n')}`);
+                if (report.cartsSkipped.length) lines.push(`ℹ️ 跳過：\n${report.cartsSkipped.join('\n')}`);
+                if (report.cartsMissing.length) lines.push(`⚠️ 場地不存在：${report.cartsMissing.join(', ')}\n（請先建立同名場地，或重新整理觸發 seed）`);
+                if (report.cartsFailed.length)  lines.push(`❌ 失敗：\n${report.cartsFailed.join('\n')}`);
+
+                showAlert(lines.join('\n'));
+            };
+
             // 🔧 連線測試：呼叫 GAS 的 ping 端點與 sendTestEmail 端點
             const handleTestEmailConnection = async () => {
                 showAlert("正在測試 GAS 連線...");
@@ -2552,6 +2626,28 @@
                                                             </div>
                                                             <button type="submit" className="w-full mt-2 bg-duo-green text-white font-extrabold uppercase py-3 rounded-2xl shadow-duo-green active:shadow-none active:translate-y-[4px] transition-all tracking-wider">Save Config</button>
                                                         </form>
+                                                    </div>
+
+                                                    {/* === 套用預設權限 === */}
+                                                    <h3 className="text-2xl font-extrabold text-duo-text mb-6 border-b-2 border-duo-grayBorder pb-4"><i className="fa-solid fa-user-shield text-duo-green mr-2"></i> 預設權限</h3>
+                                                    <div className="bg-duo-grayLight border-2 border-duo-grayBorder rounded-[2rem] p-6 mb-8">
+                                                        <p className="text-sm font-bold text-gray-500 mb-3 leading-relaxed">
+                                                            按下後會自動：<br/>
+                                                            ① 把以下使用者加入白名單（已存在則跳過）：<br/>
+                                                            <span className="ml-4 inline-block bg-white px-2 py-1 rounded mr-1 mt-1 border-2 border-blue-100 text-duo-blue">gao@nehs.hc.edu.tw</span>
+                                                            <span className="ml-1 inline-block bg-white px-2 py-1 rounded mr-1 mt-1 border-2 border-blue-100 text-duo-blue">hanyun@nehs.hc.edu.tw</span>
+                                                            <br/>
+                                                            ② 為下列場地指派審核者（已有審核者則跳過、不會覆蓋）：<br/>
+                                                            <span className="ml-4 text-xs">活動中心 → gao@nehs.hc.edu.tw</span><br/>
+                                                            <span className="ml-4 text-xs">重量訓練室、地下多功能訓練室 → hanyun@nehs.hc.edu.tw</span>
+                                                        </p>
+                                                        <button onClick={handleApplyDefaultPermissions} className="w-full bg-duo-green text-white font-extrabold uppercase py-3 rounded-2xl shadow-duo-green active:shadow-none active:translate-y-[4px] transition-all tracking-wider">
+                                                            <i className="fa-solid fa-wand-magic-sparkles mr-2"></i> 套用預設權限
+                                                        </button>
+                                                        <p className="text-[11px] font-bold text-gray-400 mt-3 leading-snug">
+                                                            ℹ️ 此操作不會覆蓋已存在的使用者或已指派的審核者，重複按沒有副作用。<br/>
+                                                            執行完會跳出詳細結果，可以看到哪些有成功 / 哪些被跳過 / 哪些失敗。
+                                                        </p>
                                                     </div>
 
                                                     {/* === Email 連線測試 === */}
