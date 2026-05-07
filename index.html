@@ -135,6 +135,25 @@
             "地下多功能訓練室": ["hanyun@nehs.hc.edu.tw"]
         };
 
+        // 🔧 部門權限對應表
+        // 每個場地都有兩個角色清單：managerDepts (場地審查者) / registrantDepts (場地登記者)
+        // 套用時會依使用者的 defaultClass 分組，再把對應部門全部 user 寫進場地權限
+        // 同一部門的人若同時出現在兩個清單，會優先當審查者（自動從登記者移除）
+        const DEPARTMENT_VENUE_PERMISSIONS = {
+            "活動中心": {
+                managerDepts:    ["國小部活動"],
+                registrantDepts: ["國小部體育", "中學部活動", "中學部體育", "雙語部活動", "雙語部體育"]
+            },
+            "重量訓練室": {
+                managerDepts:    ["雙語部體育"],
+                registrantDepts: ["國小部體育", "中學部體育"]
+            },
+            "地下多功能訓練室": {
+                managerDepts:    ["雙語部體育"],
+                registrantDepts: ["國小部體育", "中學部體育"]
+            }
+        };
+
         // 角色定義
         const ROLE_OPTIONS = [
             { value: 'user', label: '一般使用者', color: 'gray', desc: '基本帳號' },
@@ -807,6 +826,126 @@
                     console.error(err);
                     showAlert("新增失敗，請稍後再試。\n" + (err.message || err));
                 }
+            };
+
+            // 🔧 套用部門權限對應表
+            // 根據 DEPARTMENT_VENUE_PERMISSIONS 與每位 user 的 defaultClass，
+            // 自動計算並覆寫每個場地的 managerEmails / registrantEmails
+            // 會覆寫現有設定（按下前會先 confirm）
+            const handleApplyDepartmentPermissions = async () => {
+                if (!isAdmin) return showAlert("只有超級管理員可以執行此操作。");
+                if (!dbRefs) return showAlert("Firebase 尚未就緒。");
+                if (Object.keys(usersDB).length === 0) {
+                    return showAlert("白名單為空，無法套用部門權限。請先到 Admin → Users 加入使用者。");
+                }
+
+                showConfirm(
+                    "⚠️ 將根據每位 user 的「預設班級／部門」自動計算並覆寫所有場地的審查者與登記者名單。\n\n現有設定會被取代，確定繼續嗎？",
+                    async () => {
+                        // 先按 defaultClass 分組所有使用者的 email
+                        const usersByDept = {};
+                        Object.values(usersDB).forEach(u => {
+                            const dept = (u.defaultClass || '').trim();
+                            if (!dept) return;
+                            if (!usersByDept[dept]) usersByDept[dept] = [];
+                            const em = (u.email || '').trim().toLowerCase();
+                            if (em) usersByDept[dept].push(em);
+                        });
+
+                        const result = { applied: [], emptyDepts: {}, missingCarts: [], failed: [] };
+
+                        for (const [cartName, perms] of Object.entries(DEPARTMENT_VENUE_PERMISSIONS)) {
+                            // 先檢查場地是否存在
+                            try {
+                                const cartRef = dbRefs.getDocRef('carts', cartName);
+                                const cartDoc = await dbRefs.fb.getDoc(cartRef);
+                                if (!cartDoc.exists()) {
+                                    result.missingCarts.push(cartName);
+                                    continue;
+                                }
+
+                                // 收集審查者 emails
+                                const managerEmails = [];
+                                const emptyMgrDepts = [];
+                                for (const dept of perms.managerDepts) {
+                                    const emails = usersByDept[dept] || [];
+                                    if (emails.length === 0) emptyMgrDepts.push(dept);
+                                    managerEmails.push(...emails);
+                                }
+
+                                // 收集登記者 emails
+                                const registrantEmails = [];
+                                const emptyRegDepts = [];
+                                for (const dept of perms.registrantDepts) {
+                                    const emails = usersByDept[dept] || [];
+                                    if (emails.length === 0) emptyRegDepts.push(dept);
+                                    registrantEmails.push(...emails);
+                                }
+
+                                // 去重
+                                const uniqueManagers    = Array.from(new Set(managerEmails));
+                                const uniqueRegistrants = Array.from(new Set(registrantEmails));
+
+                                // 同一場地內若有人同時被列為審查者+登記者，優先保留審查者身份（從登記者移除）
+                                const cleanRegistrants = uniqueRegistrants.filter(e => !uniqueManagers.includes(e));
+                                const overlapped = uniqueRegistrants.filter(e => uniqueManagers.includes(e));
+
+                                await dbRefs.fb.updateDoc(cartRef, {
+                                    managerEmails: uniqueManagers,
+                                    registrantEmails: cleanRegistrants
+                                });
+
+                                result.applied.push({
+                                    cart: cartName,
+                                    managers: uniqueManagers,
+                                    registrants: cleanRegistrants,
+                                    overlapped
+                                });
+
+                                if (emptyMgrDepts.length || emptyRegDepts.length) {
+                                    result.emptyDepts[cartName] = {
+                                        managers: emptyMgrDepts,
+                                        registrants: emptyRegDepts
+                                    };
+                                }
+                            } catch (err) {
+                                console.error(`套用 ${cartName} 失敗`, err);
+                                result.failed.push(`${cartName}（${err.message || err}）`);
+                            }
+                        }
+
+                        addLog("Apply Dept Permissions", "System", `Updated ${result.applied.length} carts`);
+
+                        // 組詳細報告
+                        const lines = ['📋 部門權限套用結果\n'];
+                        if (result.applied.length) {
+                            result.applied.forEach(a => {
+                                lines.push(`✅ ${a.cart}`);
+                                lines.push(`   審查者 (${a.managers.length})：${a.managers.join('、') || '（無）'}`);
+                                lines.push(`   登記者 (${a.registrants.length})：${a.registrants.join('、') || '（無）'}`);
+                                if (a.overlapped.length) {
+                                    lines.push(`   ℹ️ 重疊人員已優先設為審查者：${a.overlapped.join('、')}`);
+                                }
+                            });
+                        }
+                        if (Object.keys(result.emptyDepts).length) {
+                            lines.push('\n⚠️ 以下部門目前沒有對應 user，自動略過：');
+                            Object.entries(result.emptyDepts).forEach(([cart, info]) => {
+                                const m = info.managers.length ? `審查者[${info.managers.join('/')}]` : '';
+                                const r = info.registrants.length ? `登記者[${info.registrants.join('/')}]` : '';
+                                lines.push(`   ${cart} → ${[m, r].filter(Boolean).join('、')}`);
+                            });
+                            lines.push('（之後在 Admin → Users 加入該部門的人後，重新按一次按鈕即可補上）');
+                        }
+                        if (result.missingCarts.length) {
+                            lines.push(`\n⚠️ 找不到場地（請先建立）：${result.missingCarts.join('、')}`);
+                        }
+                        if (result.failed.length) {
+                            lines.push(`\n❌ 失敗：\n${result.failed.join('\n')}`);
+                        }
+                        showAlert(lines.join('\n'));
+                    }
+                );
             };
 
             // 🔧 修復白名單大小寫：把所有非全小寫的 user 文件搬到全小寫的 doc id
@@ -2695,6 +2834,36 @@
                                                         <p className="text-[11px] font-bold text-gray-400 mt-3 leading-snug">
                                                             ℹ️ 安全操作：只搬移不會刪資料，重複按沒副作用。<br/>
                                                             執行完會列出哪些 Email 被轉小寫了。之後再加新 user 也會自動小寫，不需要再修了。
+                                                        </p>
+                                                    </div>
+
+                                                    {/* === 套用部門權限對應表 === */}
+                                                    <h3 className="text-2xl font-extrabold text-duo-text mb-6 border-b-2 border-duo-grayBorder pb-4"><i className="fa-solid fa-sitemap text-duo-blue mr-2"></i> 部門權限對應</h3>
+                                                    <div className="bg-duo-grayLight border-2 border-duo-grayBorder rounded-[2rem] p-6 mb-8">
+                                                        <p className="text-sm font-bold text-gray-500 mb-3 leading-relaxed">
+                                                            按下後會根據每位 user 的「預設班級／部門」自動分組，再依下方對應表寫入每個場地的審查者與登記者。<br/>
+                                                            <span className="text-duo-yellowDark">⚠️ 會覆寫現有設定（按下前會先確認）。</span>
+                                                        </p>
+                                                        <div className="bg-white border-2 border-duo-grayBorder rounded-xl p-3 mb-4 text-[11px] font-bold leading-relaxed">
+                                                            <div className="font-extrabold text-duo-blue mb-1">對應規則：</div>
+                                                            <div className="text-gray-600">
+                                                                <strong>活動中心</strong><br/>
+                                                                　審查者：國小部活動<br/>
+                                                                　登記者：國小部體育、中學部活動、中學部體育、雙語部活動、雙語部體育<br/>
+                                                                <strong className="block mt-2">重量訓練室</strong>
+                                                                　審查者：雙語部體育<br/>
+                                                                　登記者：國小部體育、中學部體育<br/>
+                                                                <strong className="block mt-2">地下多功能訓練室</strong>
+                                                                　審查者：雙語部體育<br/>
+                                                                　登記者：國小部體育、中學部體育
+                                                            </div>
+                                                        </div>
+                                                        <button onClick={handleApplyDepartmentPermissions} className="w-full bg-duo-blue text-white font-extrabold uppercase py-3 rounded-2xl shadow-duo-blue active:shadow-none active:translate-y-[4px] transition-all tracking-wider">
+                                                            <i className="fa-solid fa-arrows-spin mr-2"></i> 套用部門權限對應表
+                                                        </button>
+                                                        <p className="text-[11px] font-bold text-gray-400 mt-3 leading-snug">
+                                                            ℹ️ 之後新增 user 並設好部門後，再按一次按鈕就會把該人加進對應場地的權限。<br/>
+                                                            ℹ️ 報告會列出每個場地實際的審查者／登記者名單，以及哪些部門沒有 user。
                                                         </p>
                                                     </div>
 
