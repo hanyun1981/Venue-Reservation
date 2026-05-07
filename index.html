@@ -599,6 +599,17 @@
                 return w === 0 ? 6 : w - 1;
             }, [selectedDate]);
 
+            // 🔧 部門 → user 列表（用於「權限狀態總覽」面板）
+            const usersByDepartment = useMemo(() => {
+                const map = {};
+                Object.values(usersDB).forEach(u => {
+                    const dept = (u.defaultClass || '').trim() || '（無部門）';
+                    if (!map[dept]) map[dept] = [];
+                    map[dept].push(u);
+                });
+                return map;
+            }, [usersDB]);
+
             const filteredCarts = useMemo(() =>
                 sortedAllCarts
                     .filter(([name, data]) => activeFilter === 'All' || data.type === activeFilter)
@@ -2693,26 +2704,45 @@
                                                                     <button onClick={() => moveCart(name, 'down')} disabled={index === sortedAllCarts.length - 1} className="text-gray-300 hover:text-duo-blue disabled:opacity-20 disabled:hover:text-gray-300 transition-colors cursor-pointer"><i className="fa-solid fa-caret-down text-2xl leading-none"></i></button>
                                                                 </div>
                                                                 {getIcon(data.type)}
-                                                                <div className="truncate">
+                                                                <div className="min-w-0 flex-1">
                                                                     <div className="font-extrabold text-lg text-duo-text leading-none truncate">{name}</div>
                                                                     <div className="text-sm font-bold text-gray-400 mt-1 truncate">{data.capacity} 人 • {data.location}</div>
-                                                                    {Array.isArray(data.registrantEmails) && data.registrantEmails.length > 0 ? (
-                                                                        <div className="text-[11px] font-bold text-duo-greenDark mt-1 truncate">
-                                                                            <i className="fa-solid fa-user-pen mr-1"></i>
-                                                                            登記者 {data.registrantEmails.length} 人：
-                                                                            {data.registrantEmails.map(em => usersDB[em]?.name || em).join('、')}
-                                                                        </div>
-                                                                    ) : (
-                                                                        <div className="text-[11px] font-bold text-gray-300 mt-1 truncate"><i className="fa-solid fa-circle-info mr-1"></i>無指定登記者（任何人皆可預約）</div>
-                                                                    )}
+                                                                    {/* 場地審核者：完整顯示，可換行 */}
                                                                     {Array.isArray(data.managerEmails) && data.managerEmails.length > 0 ? (
-                                                                        <div className="text-[11px] font-bold text-duo-blue mt-0.5 truncate">
-                                                                            <i className="fa-solid fa-user-shield mr-1"></i>
-                                                                            審核者 {data.managerEmails.length} 人：
-                                                                            {data.managerEmails.map(em => usersDB[em]?.name || em).join('、')}
+                                                                        <div className="text-[11px] font-bold mt-1.5 leading-relaxed">
+                                                                            <span className="text-duo-blue"><i className="fa-solid fa-user-shield mr-1"></i>審核者 {data.managerEmails.length} 人：</span>
+                                                                            <span className="text-duo-text">
+                                                                                {data.managerEmails.map(em => {
+                                                                                    const u = usersDB[em];
+                                                                                    return u ? `${u.name}（${u.defaultClass || '無部門'}）` : em;
+                                                                                }).join('、')}
+                                                                            </span>
                                                                         </div>
                                                                     ) : (
-                                                                        <div className="text-[11px] font-bold text-gray-300 mt-0.5 truncate"><i className="fa-solid fa-circle-info mr-1"></i>無指定審核者（由最高管理員審核）</div>
+                                                                        <div className="text-[11px] font-bold text-duo-yellowDark bg-yellow-50 border border-duo-yellow rounded px-2 py-1 mt-1.5 inline-block">
+                                                                            <i className="fa-solid fa-triangle-exclamation mr-1"></i>無指定審核者（預約會自動通過）
+                                                                            {DEPARTMENT_VENUE_PERMISSIONS[name] && (
+                                                                                <span className="text-gray-500 font-normal block mt-0.5">
+                                                                                    ↳ 對應表規則：應由「{DEPARTMENT_VENUE_PERMISSIONS[name].managerDepts.join('、')}」部門擔任
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                    )}
+                                                                    {/* 場地登記者：完整顯示，可換行 */}
+                                                                    {Array.isArray(data.registrantEmails) && data.registrantEmails.length > 0 ? (
+                                                                        <div className="text-[11px] font-bold mt-1 leading-relaxed">
+                                                                            <span className="text-duo-greenDark"><i className="fa-solid fa-user-pen mr-1"></i>登記者 {data.registrantEmails.length} 人：</span>
+                                                                            <span className="text-duo-text">
+                                                                                {data.registrantEmails.map(em => {
+                                                                                    const u = usersDB[em];
+                                                                                    return u ? `${u.name}（${u.defaultClass || '無部門'}）` : em;
+                                                                                }).join('、')}
+                                                                            </span>
+                                                                        </div>
+                                                                    ) : (
+                                                                        <div className="text-[11px] font-bold text-gray-400 mt-1">
+                                                                            <i className="fa-solid fa-circle-info mr-1"></i>無指定登記者（任何已登入者皆可預約）
+                                                                        </div>
                                                                     )}
                                                                 </div>
                                                             </div>
@@ -2834,6 +2864,134 @@
                                                         <p className="text-[11px] font-bold text-gray-400 mt-3 leading-snug">
                                                             ℹ️ 安全操作：只搬移不會刪資料，重複按沒副作用。<br/>
                                                             執行完會列出哪些 Email 被轉小寫了。之後再加新 user 也會自動小寫，不需要再修了。
+                                                        </p>
+                                                    </div>
+
+                                                    {/* === 權限狀態總覽 === */}
+                                                    <h3 className="text-2xl font-extrabold text-duo-text mb-6 border-b-2 border-duo-grayBorder pb-4"><i className="fa-solid fa-magnifying-glass-chart text-duo-blue mr-2"></i> 權限狀態總覽</h3>
+                                                    <div className="bg-duo-grayLight border-2 border-duo-grayBorder rounded-[2rem] p-6 mb-8">
+
+                                                        {/* 部門 → user 統計 */}
+                                                        <div className="mb-5">
+                                                            <h4 className="font-extrabold text-duo-text mb-3 text-sm uppercase tracking-wider"><i className="fa-solid fa-users mr-2 text-duo-greenDark"></i>各部門目前 user 數量</h4>
+                                                            <div className="bg-white border-2 border-duo-grayBorder rounded-xl overflow-hidden">
+                                                                {(() => {
+                                                                    // 把對應表用到的所有部門 + 實際存在的部門合併、去重、排序
+                                                                    const usedInRules = new Set();
+                                                                    Object.values(DEPARTMENT_VENUE_PERMISSIONS).forEach(p => {
+                                                                        p.managerDepts.forEach(d => usedInRules.add(d));
+                                                                        p.registrantDepts.forEach(d => usedInRules.add(d));
+                                                                    });
+                                                                    const allDepts = Array.from(new Set([
+                                                                        ...usedInRules,
+                                                                        ...Object.keys(usersByDepartment)
+                                                                    ])).sort();
+                                                                    return (
+                                                                        <table className="w-full text-xs">
+                                                                            <thead className="bg-duo-grayLight border-b border-duo-grayBorder">
+                                                                                <tr>
+                                                                                    <th className="p-2 text-left font-extrabold text-gray-500">部門</th>
+                                                                                    <th className="p-2 text-center font-extrabold text-gray-500 w-16">人數</th>
+                                                                                    <th className="p-2 text-left font-extrabold text-gray-500">User 名單</th>
+                                                                                </tr>
+                                                                            </thead>
+                                                                            <tbody>
+                                                                                {allDepts.map(dept => {
+                                                                                    const list = usersByDepartment[dept] || [];
+                                                                                    const inRules = usedInRules.has(dept);
+                                                                                    const isEmpty = list.length === 0;
+                                                                                    return (
+                                                                                        <tr key={dept} className={`border-b border-gray-100 ${isEmpty && inRules ? 'bg-yellow-50' : ''}`}>
+                                                                                            <td className="p-2 font-bold text-duo-text">
+                                                                                                {dept}
+                                                                                                {inRules && <span className="ml-2 text-[10px] text-duo-blue bg-blue-50 px-1.5 py-0.5 rounded">對應表使用</span>}
+                                                                                            </td>
+                                                                                            <td className={`p-2 text-center font-extrabold ${isEmpty ? 'text-duo-red' : 'text-duo-greenDark'}`}>
+                                                                                                {list.length}
+                                                                                            </td>
+                                                                                            <td className="p-2 text-gray-600 leading-relaxed">
+                                                                                                {list.length > 0
+                                                                                                    ? list.map(u => `${u.name}（${u.email}）`).join('、')
+                                                                                                    : (inRules ? <span className="text-duo-redDark font-bold">⚠️ 對應表會用到此部門但目前沒有 user</span> : <span className="text-gray-300">—</span>)
+                                                                                                }
+                                                                                            </td>
+                                                                                        </tr>
+                                                                                    );
+                                                                                })}
+                                                                            </tbody>
+                                                                        </table>
+                                                                    );
+                                                                })()}
+                                                            </div>
+                                                        </div>
+
+                                                        {/* 場地 → 預期 vs 實際對照 */}
+                                                        <div>
+                                                            <h4 className="font-extrabold text-duo-text mb-3 text-sm uppercase tracking-wider"><i className="fa-solid fa-cube mr-2 text-duo-blue"></i>各場地審查者／登記者對照（預期 vs 實際）</h4>
+                                                            <div className="space-y-3">
+                                                                {Object.entries(DEPARTMENT_VENUE_PERMISSIONS).map(([cartName, rules]) => {
+                                                                    const cart = cartData[cartName];
+                                                                    const actualMgrs = (cart && Array.isArray(cart.managerEmails)) ? cart.managerEmails : [];
+                                                                    const actualRegs = (cart && Array.isArray(cart.registrantEmails)) ? cart.registrantEmails : [];
+
+                                                                    const expectedMgrs = rules.managerDepts.flatMap(d => (usersByDepartment[d] || []).map(u => u.email));
+                                                                    const expectedRegsRaw = rules.registrantDepts.flatMap(d => (usersByDepartment[d] || []).map(u => u.email));
+                                                                    const expectedRegs = expectedRegsRaw.filter(e => !expectedMgrs.includes(e));
+
+                                                                    const mgrMatch = expectedMgrs.length > 0 && actualMgrs.length === expectedMgrs.length && expectedMgrs.every(e => actualMgrs.includes(e));
+                                                                    const regMatch = actualRegs.length === expectedRegs.length && expectedRegs.every(e => actualRegs.includes(e));
+
+                                                                    return (
+                                                                        <div key={cartName} className="bg-white border-2 border-duo-grayBorder rounded-xl p-4">
+                                                                            <div className="font-extrabold text-duo-text text-sm mb-2 flex items-center justify-between">
+                                                                                <span><i className="fa-solid fa-location-dot text-duo-blue mr-2"></i>{cartName}</span>
+                                                                                {!cart && <span className="text-[10px] text-duo-red bg-red-50 px-2 py-0.5 rounded">⚠️ 場地不存在</span>}
+                                                                            </div>
+
+                                                                            <div className="text-[11px] mb-2">
+                                                                                <div className="font-extrabold text-duo-blue mb-1"><i className="fa-solid fa-user-shield mr-1"></i>審查者</div>
+                                                                                <div className="grid grid-cols-2 gap-2">
+                                                                                    <div className="bg-gray-50 border border-gray-200 rounded p-2">
+                                                                                        <div className="text-gray-400 font-bold mb-1">預期（依部門 [{rules.managerDepts.join(', ')}]）</div>
+                                                                                        <div className="text-duo-text font-bold leading-relaxed">
+                                                                                            {expectedMgrs.length > 0 ? expectedMgrs.join('、') : <span className="text-duo-redDark">⚠️ 此部門沒有 user</span>}
+                                                                                        </div>
+                                                                                    </div>
+                                                                                    <div className={`border-2 rounded p-2 ${mgrMatch ? 'bg-green-50 border-duo-green' : 'bg-yellow-50 border-duo-yellow'}`}>
+                                                                                        <div className="text-gray-400 font-bold mb-1">實際 {mgrMatch ? '✅ 已同步' : '⚠️ 與預期不同'}</div>
+                                                                                        <div className="text-duo-text font-bold leading-relaxed">
+                                                                                            {actualMgrs.length > 0 ? actualMgrs.join('、') : <span className="text-duo-redDark">（空）</span>}
+                                                                                        </div>
+                                                                                    </div>
+                                                                                </div>
+                                                                            </div>
+
+                                                                            <div className="text-[11px]">
+                                                                                <div className="font-extrabold text-duo-greenDark mb-1"><i className="fa-solid fa-user-pen mr-1"></i>登記者</div>
+                                                                                <div className="grid grid-cols-2 gap-2">
+                                                                                    <div className="bg-gray-50 border border-gray-200 rounded p-2">
+                                                                                        <div className="text-gray-400 font-bold mb-1">預期（依部門 [{rules.registrantDepts.join(', ')}]）</div>
+                                                                                        <div className="text-duo-text font-bold leading-relaxed">
+                                                                                            {expectedRegs.length > 0 ? expectedRegs.join('、') : <span className="text-gray-300">（無）</span>}
+                                                                                        </div>
+                                                                                    </div>
+                                                                                    <div className={`border-2 rounded p-2 ${regMatch ? 'bg-green-50 border-duo-green' : 'bg-yellow-50 border-duo-yellow'}`}>
+                                                                                        <div className="text-gray-400 font-bold mb-1">實際 {regMatch ? '✅ 已同步' : '⚠️ 與預期不同'}</div>
+                                                                                        <div className="text-duo-text font-bold leading-relaxed">
+                                                                                            {actualRegs.length > 0 ? actualRegs.join('、') : <span className="text-gray-300">（空）</span>}
+                                                                                        </div>
+                                                                                    </div>
+                                                                                </div>
+                                                                            </div>
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </div>
+
+                                                        <p className="text-[11px] font-bold text-gray-400 mt-4 leading-snug">
+                                                            ℹ️ 此面板即時反映目前的設定狀態。<br/>
+                                                            ℹ️ 若實際與預期不同，按下方藍色「套用部門權限對應表」即可同步；若預期是空的，先到 Users 加該部門的 user。
                                                         </p>
                                                     </div>
 
