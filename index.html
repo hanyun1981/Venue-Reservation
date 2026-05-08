@@ -1656,7 +1656,16 @@
                         );
                     } else {
                         setBookForm({ classType: currentUser.defaultClass, customClass: currentUser.customClass });
-                        setBookingModal({ isOpen: true, dayIdx, periodId, areaId, existingBooking: null, isEditing: false, isBatch: false, isPast: false, lock });
+                        // 如果 slot 已有其他人的 booking → 帶入「競爭預約」資訊
+                        const slotId = buildSlotId(selectedWeek, dayIdx, periodId, areaId);
+                        const competingList = getSlotBookings(cartData[selectedCart]?.schedule, slotId);
+                        const competingPrimary = getPrimaryBooking(cartData[selectedCart]?.schedule, slotId);
+                        setBookingModal({
+                            isOpen: true, dayIdx, periodId, areaId,
+                            existingBooking: null, isEditing: false, isBatch: false, isPast: false, lock,
+                            competingWith: competingPrimary,
+                            competingCount: competingList.length
+                        });
                     }
                 }
             };
@@ -2982,25 +2991,44 @@
                                                                                 const areaCompeting = areaBookings.length;
                                                                                 const areaIsMyBooking = areaBooking && areaBooking.ownerEmail === currentUser.email;
                                                                                 const areaIsSelectedBatch = batchSelection.some(s => s.slotId === areaSlotId);
+                                                                                // 找出當前使用者在此 area 是否有自己的 booking；不是則允許登記者送競爭申請
+                                                                                const myEmailLowerArea = (currentUser?.email || '').toLowerCase();
+                                                                                const myOwnInArea = areaBookings.find(b => (b.ownerEmail || '').toLowerCase() === myEmailLowerArea);
+                                                                                const canRegisterArea = canRegisterCart(selectedCart);
+                                                                                const handleAreaClick = () => {
+                                                                                    if (isBatchMode) return;
+                                                                                    if (myOwnInArea) {
+                                                                                        handleSlotClick(dayIdx, period.id, myOwnInArea, area.id);
+                                                                                    } else if (isAdmin || canApproveCart(selectedCart)) {
+                                                                                        handleSlotClick(dayIdx, period.id, areaBooking, area.id);
+                                                                                    } else if (canRegisterArea) {
+                                                                                        // 一般登記者送競爭申請
+                                                                                        handleSlotClick(dayIdx, period.id, null, area.id);
+                                                                                    }
+                                                                                };
+                                                                                const areaIsClickable = !isBatchMode && (myOwnInArea || isAdmin || canApproveCart(selectedCart) || canRegisterArea);
                                                                                 return areaBooking ? (
                                                                                     <div
                                                                                         key={area.id}
-                                                                                        onClick={() => (!isBatchMode && (areaIsMyBooking || isAdmin || canApproveCart(selectedCart))) && handleSlotClick(dayIdx, period.id, areaBooking, area.id)}
+                                                                                        onClick={handleAreaClick}
                                                                                         className={`relative rounded-xl flex flex-col items-center justify-center px-1.5 py-1 transition-all min-w-0 ${
                                                                                             isBatchMode ? 'bg-gray-100 text-gray-400 border-2 border-duo-grayBorder opacity-50 cursor-not-allowed' :
                                                                                             areaBooking.status === 'pending'
                                                                                                 ? 'bg-duo-yellow text-white shadow-[0_3px_0_0_#e5b400] cursor-pointer hover:bg-[#e5b400] active:shadow-none active:translate-y-[3px]'
-                                                                                                : (areaIsMyBooking || isAdmin || canApproveCart(selectedCart))
+                                                                                                : areaIsClickable
                                                                                                     ? 'bg-duo-green text-white shadow-[0_3px_0_0_#58a700] cursor-pointer hover:bg-[#46a302] active:shadow-none active:translate-y-[3px]'
                                                                                                     : 'bg-gray-100 text-gray-400 border-2 border-duo-grayBorder cursor-not-allowed opacity-80'
                                                                                         }`}
-                                                                                        title={areaCompeting > 1 ? `此時段共有 ${areaCompeting} 筆申請（含此筆）` : ''}
+                                                                                        title={areaCompeting > 1 ? `此時段共有 ${areaCompeting} 筆申請（含此筆）` : (canRegisterArea && !myOwnInArea ? '點擊送出競爭申請' : '')}
                                                                                     >
                                                                                         <div className="text-[10px] font-extrabold leading-none mb-0.5">{area.label}</div>
                                                                                         <i className={`fa-solid ${areaBooking.status === 'pending' ? 'fa-hourglass-half' : 'fa-circle-check'} text-xs`}></i>
                                                                                         <span className="font-extrabold text-[10px] truncate w-full text-center leading-tight mt-0.5">{areaBooking.name}</span>
                                                                                         {areaCompeting > 1 && (
                                                                                             <span className="absolute top-0.5 right-0.5 bg-duo-redDark text-white text-[9px] font-extrabold px-1 rounded">+{areaCompeting - 1}</span>
+                                                                                        )}
+                                                                                        {!myOwnInArea && !isAdmin && !canApproveCart(selectedCart) && canRegisterArea && (
+                                                                                            <span className="absolute bottom-0.5 right-0.5 bg-white/90 text-duo-blue text-[8px] font-extrabold px-1 rounded">+申請</span>
                                                                                         )}
                                                                                     </div>
                                                                                 ) : (
@@ -3023,14 +3051,33 @@
                                                                                 );
                                                                             })}
                                                                         </div>
-                                                                    ) : bookingInfo ? (
-                                                                        <div onClick={() => (!isBatchMode && (isMyBooking || isAdmin || canApproveCart(selectedCart))) && handleSlotClick(dayIdx, period.id, bookingInfo)}
-                                                                            title={competingCount > 1 ? `此時段共有 ${competingCount} 筆申請（含此筆主要顯示）` : ''}
+                                                                    ) : bookingInfo ? (() => {
+                                                                        // 找出當前使用者在此 slot 中是否有自己的 booking
+                                                                        const myEmailLower = (currentUser?.email || '').toLowerCase();
+                                                                        const myOwnInSlot = slotBookings.find(b => (b.ownerEmail || '').toLowerCase() === myEmailLower);
+                                                                        const canRegister = canRegisterCart(selectedCart);
+                                                                        const handleClick = () => {
+                                                                            if (isBatchMode) return;
+                                                                            if (myOwnInSlot) {
+                                                                                // 看自己的 booking（取消／檢視）
+                                                                                handleSlotClick(dayIdx, period.id, myOwnInSlot);
+                                                                            } else if (isAdmin || canApproveCart(selectedCart)) {
+                                                                                // admin/審核者 → 看主要 booking 進行審核
+                                                                                handleSlotClick(dayIdx, period.id, bookingInfo);
+                                                                            } else if (canRegister) {
+                                                                                // 一般登記者沒有自己的 booking → 開新表單，送競爭申請
+                                                                                handleSlotClick(dayIdx, period.id, null);
+                                                                            }
+                                                                        };
+                                                                        const isClickable = !isBatchMode && (myOwnInSlot || isAdmin || canApproveCart(selectedCart) || canRegister);
+                                                                        return (
+                                                                        <div onClick={handleClick}
+                                                                            title={competingCount > 1 ? `此時段共有 ${competingCount} 筆申請（含此筆主要顯示）` : (canRegister && !myOwnInSlot ? '點擊送出競爭申請' : '')}
                                                                             className={`relative w-full h-[72px] rounded-2xl flex flex-col items-center justify-center p-2 transition-all ${
                                                                                 isBatchMode ? 'bg-gray-100 text-gray-400 border-2 border-duo-grayBorder opacity-50 cursor-not-allowed' :
                                                                                 bookingInfo.status === 'pending'
                                                                                     ? 'bg-duo-yellow text-white shadow-[0_4px_0_0_#e5b400] cursor-pointer hover:bg-[#e5b400] active:shadow-none active:translate-y-[4px]'
-                                                                                    : (isMyBooking || isAdmin || canApproveCart(selectedCart))
+                                                                                    : isClickable
                                                                                         ? 'bg-duo-green text-white shadow-duo-green cursor-pointer hover:bg-[#46a302] active:shadow-none active:translate-y-[4px]'
                                                                                         : 'bg-gray-100 text-gray-400 border-2 border-duo-grayBorder cursor-not-allowed opacity-80'
                                                                             }`}
@@ -3047,8 +3094,14 @@
                                                                                     🔁 +{competingCount - 1}
                                                                                 </span>
                                                                             )}
+                                                                            {!myOwnInSlot && !isAdmin && !canApproveCart(selectedCart) && canRegister && (
+                                                                                <span className="absolute bottom-1 right-1 bg-white/90 text-duo-blue text-[9px] font-extrabold px-1.5 py-0.5 rounded shadow">
+                                                                                    +申請
+                                                                                </span>
+                                                                            )}
                                                                         </div>
-                                                                    ) : (
+                                                                        );
+                                                                    })() : (
                                                                         <div onClick={() => handleSlotClick(dayIdx, period.id, null)}
                                                                             className={`w-full h-[72px] rounded-2xl flex flex-col items-center justify-center cursor-pointer transition-all group ${
                                                                                 isSelectedBatch
@@ -3820,6 +3873,20 @@
                                             </div>
                                         );
                                     })()}
+
+                                    {/* 競爭預約警告：新申請時，此 slot 已有其他人的 booking */}
+                                    {!bookingModal.existingBooking && !bookingModal.isBatch && bookingModal.competingWith && (
+                                        <div className="bg-orange-50 border-2 border-duo-yellow rounded-2xl p-4 mb-4 text-sm font-bold text-duo-yellowDark">
+                                            <div className="flex items-center mb-1.5">
+                                                <i className="fa-solid fa-arrows-rotate mr-2"></i>
+                                                <span className="font-extrabold">競爭預約（共 {bookingModal.competingCount} 筆申請）</span>
+                                            </div>
+                                            <p className="text-xs leading-relaxed">
+                                                此時段已有預約：<strong>{bookingModal.competingWith.name}</strong>（{bookingModal.competingWith.className}）— 狀態 {bookingModal.competingWith.status === 'approved' ? '✅ 已核准' : '⏳ 未審核'}<br/>
+                                                你的申請會以「未審核」加入競爭，由審查者決定哪一筆勝出。
+                                            </p>
+                                        </div>
+                                    )}
 
                                     {/* 鎖定衝突資訊：檢視已存在的預約時 */}
                                     {bookingModal.existingBooking?.conflictsWithLock && (
