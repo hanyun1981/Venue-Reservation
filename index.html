@@ -133,10 +133,6 @@
             "地下多功能訓練室": []
         };
 
-        // 一次性清理：這些 email 會在超級管理員登入時自動從 Firestore 移除
-        // （包括 users 表、各場地的 managerEmails / registrantEmails）
-        const USERS_TO_REMOVE = ['gao@nehs.hc.edu.tw', 'hanyun@nehs.hc.edu.tw'];
-
         // 🔧 批次重複預約預設清單
         // dayIdx: 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
         // periodIds: 對應 periods 陣列中的 id
@@ -552,73 +548,6 @@
                     }
                 })();
             }, [dbRefs, isAdmin]);
-
-            // 🔧 一次性清理：移除 USERS_TO_REMOVE 中列出的 email
-            // 從 users 表刪掉、並從每個 cart 的 managerEmails / registrantEmails 移除
-            // 只在超級管理員登入時跑一次
-            useEffect(() => {
-                if (!dbRefs || !isAdmin) return;
-                if (window.__usersToRemoveCleanedUp) return;
-                if (!Array.isArray(USERS_TO_REMOVE) || USERS_TO_REMOVE.length === 0) return;
-                // 等 cartData 載完才執行（不然 Object.entries 會空白跑過）
-                if (Object.keys(cartData).length === 0) return;
-                window.__usersToRemoveCleanedUp = true;
-
-                (async () => {
-                    const lowerSet = new Set(USERS_TO_REMOVE.map(e => (e || '').trim().toLowerCase()));
-                    const removed = { users: [], cartUpdates: [], failed: [] };
-
-                    try {
-                        // 1) 刪 users 文件（同時嘗試小寫與原始字串，以防舊資料是大小寫混雜）
-                        for (const email of lowerSet) {
-                            for (const docId of [email, email.toUpperCase(), USERS_TO_REMOVE.find(e => e.toLowerCase() === email)]) {
-                                if (!docId) continue;
-                                try {
-                                    const ref = dbRefs.getDocRef('users', docId);
-                                    const snap = await dbRefs.fb.getDoc(ref);
-                                    if (snap.exists()) {
-                                        await dbRefs.fb.deleteDoc(ref);
-                                        removed.users.push(docId);
-                                        console.log('[清理] 已刪除 user:', docId);
-                                    }
-                                } catch (e) { /* ignore */ }
-                            }
-                        }
-
-                        // 2) 從每個 cart 的 managerEmails / registrantEmails 移除
-                        for (const [cartName, data] of Object.entries(cartData)) {
-                            const before = {
-                                m: Array.isArray(data.managerEmails)    ? data.managerEmails    : [],
-                                r: Array.isArray(data.registrantEmails) ? data.registrantEmails : []
-                            };
-                            const after = {
-                                m: before.m.filter(e => !lowerSet.has((e || '').trim().toLowerCase())),
-                                r: before.r.filter(e => !lowerSet.has((e || '').trim().toLowerCase()))
-                            };
-                            if (after.m.length !== before.m.length || after.r.length !== before.r.length) {
-                                try {
-                                    await dbRefs.fb.updateDoc(dbRefs.getDocRef('carts', cartName), {
-                                        managerEmails: after.m,
-                                        registrantEmails: after.r
-                                    });
-                                    removed.cartUpdates.push(cartName);
-                                    console.log('[清理] 已從場地移除:', cartName);
-                                } catch (e) {
-                                    removed.failed.push(`${cartName}: ${e.message || e}`);
-                                }
-                            }
-                        }
-
-                        if (removed.users.length || removed.cartUpdates.length) {
-                            addLog("Cleanup Removed Users", "System",
-                                `刪除 user: [${removed.users.join(', ')}], 場地清理: [${removed.cartUpdates.join(', ')}]`
-                            );
-                        }
-                    } catch (err) {
-                        console.error('[清理] 失敗：', err);
-                    }
-                })();
-            }, [dbRefs, isAdmin, cartData]);
 
             // 🔧 FIX [效能]: Logs 改為「懶載入」— 只在管理員切到 logs tab 時才訂閱
             // 原本管理員一登入就 onSnapshot 訂閱 100 筆 logs（即使在看其他 tab），
