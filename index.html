@@ -793,6 +793,44 @@
                 return `${date.getMonth() + 1}/${date.getDate()}`;
             };
 
+            // ============================================================
+            // 🔧 多筆競爭預約：一個 slot 可同時存在多筆 booking（一筆 approved + N 筆 pending）
+            // 資料結構：schedule[slotId] 可以是
+            //   - 舊版單一 object（向後相容，自動視為單元素 array）
+            //   - 新版 array of bookings（每筆有獨立 bookingId 與 status）
+            // ============================================================
+
+            // 取出 slot 的所有 booking，永遠回傳 array（空則回 []）
+            const getSlotBookings = (schedule, slotId) => {
+                const v = schedule?.[slotId];
+                if (!v) return [];
+                if (Array.isArray(v)) return v.filter(Boolean);
+                // 舊版單筆 → 包成 array，補 bookingId 以便後續操作
+                return [{ ...v, bookingId: v.bookingId || `legacy_${slotId}` }];
+            };
+
+            // 取「主要顯示用」booking：優先 approved；其次第一筆 pending；其餘 null
+            const getPrimaryBooking = (schedule, slotId) => {
+                const list = getSlotBookings(schedule, slotId);
+                return list.find(b => b.status === 'approved') || list[0] || null;
+            };
+
+            // 該 slot 是否已有 approved booking
+            const hasApprovedBooking = (schedule, slotId) => {
+                return getSlotBookings(schedule, slotId).some(b => b.status === 'approved');
+            };
+
+            // 該 slot 中該使用者是否已有 booking（同一人不能重複申請同一 slot）
+            const userHasBookingInSlot = (schedule, slotId, email) => {
+                const lower = (email || '').trim().toLowerCase();
+                return getSlotBookings(schedule, slotId).some(b =>
+                    ((b.ownerEmail || b.email || '').trim().toLowerCase()) === lower
+                );
+            };
+
+            // 產生新的 bookingId
+            const newBookingId = () => `b_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
             const handleSaturdayToggle = async (e) => {
                 const newVal = e.target.checked;
                 setAllowSaturday(newVal); 
@@ -1731,6 +1769,7 @@
                 const effectiveInitialStatus = effectiveNeedsApproval ? 'pending' : 'approved';
 
                 try {
+                    let hasCompetingApproved = false;
                     await dbRefs.fb.runTransaction(dbRefs.db, async (transaction) => {
                         const cartDoc = await transaction.get(cartRef);
                         if (!cartDoc.exists()) throw "CART_NOT_FOUND";
@@ -1739,19 +1778,31 @@
                         const currentSchedule = currentData.schedule || {};
 
                         for (const slot of slotsToBook) {
-                            if (currentSchedule[slot.slotId]) {
-                                throw "SLOT_ALREADY_TAKEN";
+                            // 取出該 slot 既有的 booking（向後相容單筆 / 陣列）
+                            const existingList = getSlotBookings(currentSchedule, slot.slotId);
+                            // 同一人不能在同一 slot 重複申請（避免按兩下重複送）
+                            if (userHasBookingInSlot(currentSchedule, slot.slotId, currentUser.email)) {
+                                throw "USER_DUPLICATE_BOOKING";
+                            }
+                            // 若該 slot 已有 approved booking → 競爭模式：新申請強制為 pending
+                            // （即使 admin 也是，避免一個 slot 同時兩筆 approved；admin 想換人勝出要走審核流程）
+                            const slotHasApproved = existingList.some(b => b.status === 'approved');
+                            if (slotHasApproved) {
+                                hasCompetingApproved = true;
                             }
                             const lockInfo = slotLockMap[slot.slotId];
-                            currentSchedule[slot.slotId] = {
+                            const slotFinalStatus = slotHasApproved ? 'pending' : effectiveInitialStatus;
+                            const newBooking = {
+                                bookingId: newBookingId(),
                                 name: currentUser.name, email: currentUser.email,
                                 className: finalClass, ownerEmail: currentUser.email,
                                 areaId: slot.areaId || 'main',
                                 areaLabel: getSlotAreaLabel(slot.areaId),
-                                status: effectiveInitialStatus,
+                                status: slotFinalStatus,
                                 createdAt: Date.now(),
                                 ...(lockInfo ? { conflictsWithLock: lockInfo, overridesLock: false } : {})
                             };
+                            currentSchedule[slot.slotId] = [...existingList, newBooking];
                         }
                         transaction.update(cartRef, { schedule: currentSchedule });
                     });
@@ -1791,11 +1842,14 @@
                         const lockMsg = hasAnyLockedSlot
                             ? `\n\n⚠️ 你選的時段包含被鎖定的格子，審核通過後該預約會覆寫鎖定顯示。`
                             : '';
-                        showAlert(`✅ 預約已送出！\n\n狀態：未審核（等待最高管理員或場地審核者核准）\n審核結果將反映在「My Bookings」頁面，並會以 email 同步通知。${lockMsg}`);
+                        const competeMsg = hasCompetingApproved
+                            ? `\n\n🔁 該時段已有其他預約成立，你的申請屬於「競爭預約」，審查者會決定哪一筆勝出。`
+                            : '';
+                        showAlert(`✅ 預約已送出！\n\n狀態：未審核（等待最高管理員或場地審核者核准）\n審核結果將反映在「My Bookings」頁面，並會以 email 同步通知。${lockMsg}${competeMsg}`);
                     }
 
                 } catch (error) {
-                    if (error === "SLOT_ALREADY_TAKEN") showAlert("慢了一步！你選的時段中，有部分已被別人搶走囉，請重新選擇。");
+                    if (error === "USER_DUPLICATE_BOOKING") showAlert("你已經在這個時段提交過申請，請至「My Bookings」查看狀態。");
                     else if (error === "CART_NOT_FOUND") showAlert("找不到該設備，可能已被管理員刪除。");
                     else showAlert("預約發生錯誤，請稍後檢查網路連線再試。");
                     setBookingModal({ isOpen: false, dayIdx: null, periodId: null, existingBooking: null, isEditing: false, isBatch: false });
@@ -1814,9 +1868,12 @@
                 const conflictingSlots = slotsToBook.filter(slot => {
                     return Object.entries(cartData).some(([cName, cData]) => {
                         if (cName === selectedCart || !cData.schedule) return false;
-                        return Object.entries(cData.schedule).some(([otherSlotId, info]) =>
-                            getBaseSlotId(otherSlotId) === getBaseSlotId(slot.slotId) && info?.className === finalClass
-                        );
+                        return Object.keys(cData.schedule).some(otherSlotId => {
+                            if (getBaseSlotId(otherSlotId) !== getBaseSlotId(slot.slotId)) return false;
+                            const list = getSlotBookings(cData.schedule, otherSlotId);
+                            // 同 className 任一筆 booking 都算衝突
+                            return list.some(info => info?.className === finalClass);
+                        });
                     });
                 });
 
@@ -1840,7 +1897,9 @@
                 return list.some(e => (e || '').trim().toLowerCase() === myEmail);
             }, [isAdmin, cartData, currentUser]);
 
-            const reviewBooking = async (cartName, slotId, decision) => {
+            // reviewBooking 接受 bookingId 參數，可指定要審核哪一筆（同一 slot 可有多筆競爭）
+            // 若 bookingId 為 null/undefined → fallback 到「該 slot 第一筆 pending」（向後相容）
+            const reviewBooking = async (cartName, slotId, decision, bookingId = null) => {
                 // decision: 'approved' | 'rejected'
                 if (!canApproveCart(cartName)) {
                     showAlert("你沒有審核此場地的權限。");
@@ -1849,33 +1908,56 @@
                 const cartRef = dbRefs.getDocRef('carts', cartName);
                 try {
                     let bookingDetail = null;
+                    let autoRejected = []; // 同 slot 中被自動退回的競爭申請
                     await dbRefs.fb.runTransaction(dbRefs.db, async (transaction) => {
                         const cartDoc = await transaction.get(cartRef);
                         if (!cartDoc.exists()) throw "CART_NOT_FOUND";
                         const schedule = cartDoc.data().schedule || {};
-                        if (!schedule[slotId]) throw "SLOT_NOT_FOUND";
-                        bookingDetail = { ...schedule[slotId] };
+                        const list = getSlotBookings(schedule, slotId);
+                        if (list.length === 0) throw "SLOT_NOT_FOUND";
+
+                        // 找出要操作的 booking
+                        let targetIdx;
+                        if (bookingId) {
+                            targetIdx = list.findIndex(b => b.bookingId === bookingId);
+                        } else {
+                            // 向後相容：如果沒給 bookingId，預設操作第一筆 pending；若沒 pending 則操作第一筆
+                            targetIdx = list.findIndex(b => b.status === 'pending');
+                            if (targetIdx === -1) targetIdx = 0;
+                        }
+                        if (targetIdx === -1) throw "BOOKING_NOT_FOUND";
+
+                        bookingDetail = { ...list[targetIdx] };
 
                         if (decision === 'approved') {
-                            // 若此 booking 與鎖定衝突，核准等同於「覆寫鎖定」
-                            const wasLockConflict = !!schedule[slotId].conflictsWithLock;
-                            schedule[slotId] = {
-                                ...schedule[slotId],
+                            // 核准：把這筆改成 approved，其他同 slot 的 booking 全部自動退回（移除）
+                            const wasLockConflict = !!list[targetIdx].conflictsWithLock;
+                            const updated = {
+                                ...list[targetIdx],
                                 status: 'approved',
                                 reviewedAt: Date.now(),
                                 reviewedBy: currentUser.email,
                                 ...(wasLockConflict ? { overridesLock: true } : {})
                             };
+                            // 收集被自動退回的 → 之後寄結果信
+                            autoRejected = list.filter((_, i) => i !== targetIdx);
+                            schedule[slotId] = [updated];
                             transaction.update(cartRef, { schedule });
                         } else {
-                            // 退回直接刪除
-                            delete schedule[slotId];
+                            // 退回：只移除這一筆，其他競爭 booking 保留
+                            const remaining = list.filter((_, i) => i !== targetIdx);
+                            if (remaining.length === 0) {
+                                delete schedule[slotId];
+                            } else {
+                                schedule[slotId] = remaining;
+                            }
                             transaction.update(cartRef, { schedule });
                         }
                     });
 
                     const slotParts = parseSlotId(slotId);
-                    const detailStr = slotParts ? `W${slotParts.week} ${currentDays[slotParts.dayIdx]} P${slotParts.periodId}${slotParts.areaLabel ? ` ${slotParts.areaLabel}` : ''} (${bookingDetail?.name})` : slotId;
+                    const autoRejTag = autoRejected.length > 0 ? ` (auto-rejected ${autoRejected.length} competing)` : '';
+                    const detailStr = slotParts ? `W${slotParts.week} ${currentDays[slotParts.dayIdx]} P${slotParts.periodId}${slotParts.areaLabel ? ` ${slotParts.areaLabel}` : ''} (${bookingDetail?.name})${autoRejTag}` : slotId;
                     addLog(decision === 'approved' ? "Approve Booking" : "Reject Booking", cartName, detailStr);
 
                     // 🔧 寄結果信：申請人 + 該場地所有可登記者 + 該場地所有審核者
@@ -1905,11 +1987,38 @@
                             periodName: `${periodInfo ? periodInfo.name : `Period ${periodId}`}${slotParts.areaLabel ? ` · ${slotParts.areaLabel}` : ''}`,
                             slotDate: getDateForDayIdx(week, dayIdx)
                         });
+
+                        // 同 slot 中被自動退回的競爭申請也要寄退回信
+                        if (autoRejected.length > 0) {
+                            for (const rej of autoRejected) {
+                                sendReviewResultEmail({
+                                    decision: 'rejected',
+                                    applicantEmail: rej.ownerEmail || rej.email,
+                                    applicantName: rej.name,
+                                    registrantEmails: allRegistrants,
+                                    otherManagerEmails: allManagers,
+                                    reviewerName: currentUser.name,
+                                    reviewerEmail: currentUser.email,
+                                    cartName,
+                                    className: rej.className,
+                                    week,
+                                    dayName: currentDays[dayIdx],
+                                    periodName: `${periodInfo ? periodInfo.name : `Period ${periodId}`}${slotParts.areaLabel ? ` · ${slotParts.areaLabel}` : ''}（競爭預約：${bookingDetail.name} 已勝出）`,
+                                    slotDate: getDateForDayIdx(week, dayIdx)
+                                });
+                            }
+                        }
                     }
 
-                    showAlert(decision === 'approved' ? "✅ 已核准此預約，結果已寄信通知申請人。" : "❎ 已退回此預約，結果已寄信通知申請人。");
+                    const autoRejMsg = autoRejected.length > 0
+                        ? `\n\n🔁 同時自動退回 ${autoRejected.length} 筆競爭申請：${autoRejected.map(r => `${r.name}（${r.className}）`).join('、')}\n（已寄信通知這些申請人）`
+                        : '';
+                    showAlert(decision === 'approved'
+                        ? `✅ 已核准此預約，結果已寄信通知申請人。${autoRejMsg}`
+                        : `❎ 已退回此預約，結果已寄信通知申請人。`
+                    );
                 } catch (err) {
-                    if (err === "SLOT_NOT_FOUND") showAlert("這筆預約已不存在，可能已被取消。");
+                    if (err === "SLOT_NOT_FOUND" || err === "BOOKING_NOT_FOUND") showAlert("這筆預約已不存在，可能已被取消。");
                     else if (err === "CART_NOT_FOUND") showAlert("找不到該場地。");
                     else { console.error(err); showAlert("審核失敗，請稍後再試。"); }
                 }
@@ -1957,23 +2066,31 @@
             }, [dbRefs, currentUser, isAdmin, canApproveCart]);
 
             // 計算「等待我審核」的清單（給管理者用）
+            // 🔧 列出所有「等我審核」的 pending booking（每筆獨立，含 bookingId）
+            //   多筆競爭預約會各自顯示為一筆，並在 UI 標記同 slot 還有幾個競爭者
             const pendingForMe = useMemo(() => {
                 if (!currentUser && !isAdmin) return [];
                 const result = [];
                 Object.entries(cartData).forEach(([cartName, data]) => {
                     if (!canApproveCart(cartName)) return;
                     const sch = data.schedule || {};
-                    Object.entries(sch).forEach(([slotId, info]) => {
-                        if (info.status === 'pending') {
-                            const slotParts = parseSlotId(slotId);
-                            if (slotParts) {
-                                result.push({
-                                    cartName, slotId, info,
-                                    week: slotParts.week, dayIdx: slotParts.dayIdx, periodId: slotParts.periodId,
-                                    areaId: slotParts.areaId, areaLabel: slotParts.areaLabel
-                                });
+                    Object.keys(sch).forEach(slotId => {
+                        const list = getSlotBookings(sch, slotId);
+                        const competitorsCount = list.length; // 同 slot 全部 booking 數（含 approved）
+                        list.forEach(info => {
+                            if (info.status === 'pending') {
+                                const slotParts = parseSlotId(slotId);
+                                if (slotParts) {
+                                    result.push({
+                                        cartName, slotId, info,
+                                        bookingId: info.bookingId,
+                                        competitorsCount,
+                                        week: slotParts.week, dayIdx: slotParts.dayIdx, periodId: slotParts.periodId,
+                                        areaId: slotParts.areaId, areaLabel: slotParts.areaLabel
+                                    });
+                                }
                             }
-                        }
+                        });
                     });
                 });
                 result.sort((a, b) => {
@@ -1993,22 +2110,38 @@
                 const slotId = buildSlotId(selectedWeek, bookingModal.dayIdx, bookingModal.periodId, bookingModal.areaId || bookingModal.existingBooking?.areaId || 'main');
                 const cartRef = dbRefs.getDocRef('carts', selectedCart);
                 
+                // 從 modal 拿到要取消的特定 bookingId（多筆競爭時不會誤刪別人的）
+                const targetBookingId = bookingModal.existingBooking?.bookingId;
                 try {
                     let cancelledName = '';
                     await dbRefs.fb.runTransaction(dbRefs.db, async (transaction) => {
                         const cartDoc = await transaction.get(cartRef);
                         if (!cartDoc.exists()) throw "CART_NOT_FOUND";
-                        
+
                         const currentSchedule = cartDoc.data().schedule || {};
-                        if (!currentSchedule[slotId]) throw "ALREADY_CANCELLED";
-                        
+                        const list = getSlotBookings(currentSchedule, slotId);
+                        if (list.length === 0) throw "ALREADY_CANCELLED";
+
+                        // 找出要取消的 booking
+                        let targetIdx = targetBookingId
+                            ? list.findIndex(b => b.bookingId === targetBookingId)
+                            : list.findIndex(b => (b.ownerEmail || '').toLowerCase() === (currentUser.email || '').toLowerCase());
+                        if (targetIdx === -1) targetIdx = 0;
+                        const target = list[targetIdx];
+                        if (!target) throw "ALREADY_CANCELLED";
+
                         // 非管理員只能取消自己的預約
-                        if (!isAdmin && currentSchedule[slotId].ownerEmail !== currentUser.email) {
+                        if (!isAdmin && (target.ownerEmail || '').toLowerCase() !== (currentUser.email || '').toLowerCase()) {
                             throw "NOT_OWNER";
                         }
-                        
-                        cancelledName = currentSchedule[slotId].name;
-                        delete currentSchedule[slotId];
+
+                        cancelledName = target.name;
+                        const remaining = list.filter((_, i) => i !== targetIdx);
+                        if (remaining.length === 0) {
+                            delete currentSchedule[slotId];
+                        } else {
+                            currentSchedule[slotId] = remaining;
+                        }
                         transaction.update(cartRef, { schedule: currentSchedule });
                     });
 
@@ -2021,7 +2154,7 @@
                     else if (error === "CART_NOT_FOUND") showAlert("找不到該設備。");
                     else showAlert("取消失敗，請稍後再試。");
                 }
-                
+
                 setBookingModal({ isOpen: false, dayIdx: null, periodId: null, existingBooking: null, isEditing: false, isBatch: false });
             };
 
@@ -2041,6 +2174,7 @@
                 const finalClass = editBookForm.classType === 'Other (Specify)' ? editBookForm.customClass : editBookForm.classType;
                 const cartRef = dbRefs.getDocRef('carts', selectedCart);
                 
+                const targetBookingId = bookingModal.existingBooking?.bookingId;
                 try {
                     await dbRefs.fb.runTransaction(dbRefs.db, async (transaction) => {
                         const cartDoc = await transaction.get(cartRef);
@@ -2048,19 +2182,25 @@
 
                         const currentData = cartDoc.data();
                         const currentSchedule = currentData.schedule || {};
+                        const list = getSlotBookings(currentSchedule, slotId);
+                        if (list.length === 0) throw "SLOT_NOT_FOUND";
 
-                        if (!currentSchedule[slotId]) {
-                            throw "SLOT_NOT_FOUND"; 
-                        }
-                        
-                        currentSchedule[slotId] = { 
-                            ...currentSchedule[slotId],
-                            name: editBookForm.name, 
-                            email: editBookForm.email, 
-                            className: finalClass, 
-                            ownerEmail: editBookForm.email 
+                        // 找出要更新的 booking
+                        let targetIdx = targetBookingId
+                            ? list.findIndex(b => b.bookingId === targetBookingId)
+                            : 0;
+                        if (targetIdx === -1) throw "SLOT_NOT_FOUND";
+
+                        const updated = {
+                            ...list[targetIdx],
+                            name: editBookForm.name,
+                            email: editBookForm.email,
+                            className: finalClass,
+                            ownerEmail: editBookForm.email
                         };
-                        
+                        const newList = list.map((b, i) => i === targetIdx ? updated : b);
+                        currentSchedule[slotId] = newList;
+
                         transaction.update(cartRef, { schedule: currentSchedule });
                     });
 
@@ -2159,11 +2299,15 @@
             const allMyBookings = useMemo(() => {
                 const myBookings = [];
                 if (!currentUser) return myBookings;
-                
+                const myEmail = (currentUser.email || '').trim().toLowerCase();
+
                 Object.entries(cartData).forEach(([cartName, data]) => {
-                    if (data.schedule) {
-                        Object.entries(data.schedule).forEach(([slotId, bookingInfo]) => {
-                            if (bookingInfo.ownerEmail === currentUser.email) {
+                    if (!data.schedule) return;
+                    Object.keys(data.schedule).forEach(slotId => {
+                        const list = getSlotBookings(data.schedule, slotId);
+                        list.forEach(bookingInfo => {
+                            const ownerLower = (bookingInfo.ownerEmail || bookingInfo.email || '').trim().toLowerCase();
+                            if (ownerLower === myEmail) {
                                 const slotParts = parseSlotId(slotId);
                                 if (slotParts) {
                                     myBookings.push({
@@ -2174,13 +2318,14 @@
                                         areaId: slotParts.areaId,
                                         areaLabel: slotParts.areaLabel,
                                         slotId,
+                                        bookingId: bookingInfo.bookingId,
                                         className: bookingInfo.className,
                                         status: bookingInfo.status || 'approved'
                                     });
                                 }
                             }
                         });
-                    }
+                    });
                 });
 
                 myBookings.sort((a, b) => {
@@ -2191,27 +2336,40 @@
                 return myBookings;
             }, [cartData, currentUser]);
 
-            // 🔧 FIX [衝突]: cancelBookingFromList 也改用 runTransaction
-            const cancelBookingFromList = (cartName, slotId, className) => {
+            // 🔧 從清單取消特定 booking — 多筆競爭時用 bookingId 精準找到要刪的那一筆
+            const cancelBookingFromList = (cartName, slotId, className, bookingId = null) => {
                 showConfirm(`Are you sure you want to cancel this booking for ${cartName}?`, async () => {
                     const cartRef = dbRefs.getDocRef('carts', cartName);
-                    
+
                     try {
                         await dbRefs.fb.runTransaction(dbRefs.db, async (transaction) => {
                             const cartDoc = await transaction.get(cartRef);
                             if (!cartDoc.exists()) throw "CART_NOT_FOUND";
-                            
+
                             const currentSchedule = cartDoc.data().schedule || {};
-                            if (!currentSchedule[slotId]) throw "ALREADY_CANCELLED";
-                            
-                            if (!isAdmin && currentSchedule[slotId].ownerEmail !== currentUser.email) {
+                            const list = getSlotBookings(currentSchedule, slotId);
+                            if (list.length === 0) throw "ALREADY_CANCELLED";
+
+                            // 找出要刪的那筆：先用 bookingId，若沒給則找符合 owner 的第一筆
+                            let targetIdx = bookingId
+                                ? list.findIndex(b => b.bookingId === bookingId)
+                                : list.findIndex(b => (b.ownerEmail || '').toLowerCase() === (currentUser.email || '').toLowerCase());
+                            if (targetIdx === -1) throw "ALREADY_CANCELLED";
+                            const target = list[targetIdx];
+
+                            if (!isAdmin && (target.ownerEmail || '').toLowerCase() !== (currentUser.email || '').toLowerCase()) {
                                 throw "NOT_OWNER";
                             }
-                            
-                            delete currentSchedule[slotId];
+
+                            const remaining = list.filter((_, i) => i !== targetIdx);
+                            if (remaining.length === 0) {
+                                delete currentSchedule[slotId];
+                            } else {
+                                currentSchedule[slotId] = remaining;
+                            }
                             transaction.update(cartRef, { schedule: currentSchedule });
                         });
-                        
+
                         const slotParts = parseSlotId(slotId);
                         if (slotParts) addLog("Cancel Booking", cartName, `W${slotParts.week} ${currentDays[slotParts.dayIdx]} P${slotParts.periodId}${slotParts.areaLabel ? ` ${slotParts.areaLabel}` : ''} (${className})`);
                     } catch (error) {
@@ -2449,23 +2607,37 @@
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                                             {pendingForMe.map((p, i) => {
                                                 const periodInfo = periods.find(pp => String(pp.id) === String(p.periodId));
+                                                const competing = p.competitorsCount > 1;
                                                 return (
-                                                    <div key={i} className="bg-white border-2 border-duo-yellow rounded-2xl p-4 flex flex-col">
+                                                    <div key={p.bookingId || i} className={`bg-white border-2 rounded-2xl p-4 flex flex-col ${competing ? 'border-duo-red' : 'border-duo-yellow'}`}>
                                                         <div className="flex justify-between items-start mb-2">
                                                             <div className="font-extrabold text-duo-text">
                                                                 <i className="fa-solid fa-cube text-duo-blue mr-2"></i>{p.cartName}
                                                             </div>
-                                                            <span className="text-[11px] font-extrabold bg-duo-yellow/20 text-duo-yellowDark px-2 py-0.5 rounded-md uppercase">{p.info.className}</span>
+                                                            <div className="flex flex-col items-end gap-1">
+                                                                <span className="text-[11px] font-extrabold bg-duo-yellow/20 text-duo-yellowDark px-2 py-0.5 rounded-md uppercase">{p.info.className}</span>
+                                                                {competing && (
+                                                                    <span className="text-[10px] font-extrabold bg-duo-red/15 text-duo-redDark px-2 py-0.5 rounded-md">
+                                                                        🔁 競爭預約 {p.competitorsCount} 筆
+                                                                    </span>
+                                                                )}
+                                                            </div>
                                                         </div>
                                                         <div className="text-sm font-bold text-gray-500 mb-3 leading-relaxed">
                                                             <div><i className="fa-solid fa-user mr-2 text-gray-400"></i>{p.info.name} <span className="text-xs text-gray-400">({p.info.email})</span></div>
                                                             <div><i className="fa-regular fa-calendar mr-2 text-gray-400"></i>第 {p.week} 週 {currentDays[p.dayIdx]} {periodInfo ? periodInfo.name : `P${p.periodId}`}{p.areaLabel ? ` · ${p.areaLabel}` : ''}</div>
+                                                            {competing && (
+                                                                <div className="text-[11px] mt-1 text-duo-redDark">
+                                                                    <i className="fa-solid fa-circle-exclamation mr-1"></i>
+                                                                    核准此筆會自動退回其他 {p.competitorsCount - 1} 筆同時段申請
+                                                                </div>
+                                                            )}
                                                         </div>
                                                         <div className="flex gap-2 mt-auto">
-                                                            <button onClick={() => reviewBooking(p.cartName, p.slotId, 'rejected')} className="flex-1 bg-white border-2 border-duo-red text-duo-red font-extrabold uppercase py-2 rounded-xl text-sm shadow-[0_3px_0_0_#ea2b2b] active:shadow-none active:translate-y-[3px] transition-all">
+                                                            <button onClick={() => reviewBooking(p.cartName, p.slotId, 'rejected', p.bookingId)} className="flex-1 bg-white border-2 border-duo-red text-duo-red font-extrabold uppercase py-2 rounded-xl text-sm shadow-[0_3px_0_0_#ea2b2b] active:shadow-none active:translate-y-[3px] transition-all">
                                                                 <i className="fa-solid fa-xmark mr-1"></i> 退回
                                                             </button>
-                                                            <button onClick={() => reviewBooking(p.cartName, p.slotId, 'approved')} className="flex-[2] bg-duo-green text-white font-extrabold uppercase py-2 rounded-xl text-sm shadow-duo-green active:shadow-none active:translate-y-[3px] transition-all">
+                                                            <button onClick={() => reviewBooking(p.cartName, p.slotId, 'approved', p.bookingId)} className="flex-[2] bg-duo-green text-white font-extrabold uppercase py-2 rounded-xl text-sm shadow-duo-green active:shadow-none active:translate-y-[3px] transition-all">
                                                                 <i className="fa-solid fa-check mr-1"></i> 核准
                                                             </button>
                                                         </div>
@@ -2520,7 +2692,10 @@
                                                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
                                                     {displayedBookings.map((b, idx) => {
                                                         const targetPeriod = periods.find(p => p.id == b.periodId);
-                                                        const bStatus = cartData[b.cartName]?.schedule?.[b.slotId]?.status || b.status;
+                                                        // 從 schedule 找這筆 booking 的最新狀態（多筆時用 bookingId 精準對應）
+                                                        const slotList = getSlotBookings(cartData[b.cartName]?.schedule, b.slotId);
+                                                        const myEntry = b.bookingId ? slotList.find(x => x.bookingId === b.bookingId) : slotList[0];
+                                                        const bStatus = myEntry?.status || b.status;
                                                         const isPending = bStatus === 'pending';
                                                         return (
                                                             <div key={idx} className={`bg-white rounded-3xl border-2 border-duo-grayBorder shadow-[0_6px_0_0_#e5e5e5] p-5 flex flex-col relative overflow-hidden group transition-colors ${myBookingsTab === 'history' ? 'opacity-80' : 'hover:border-duo-blue'}`}>
@@ -2566,7 +2741,7 @@
                                                                 </div>
 
                                                                 {myBookingsTab === 'upcoming' ? (
-                                                                    <button onClick={() => cancelBookingFromList(b.cartName, b.slotId, b.className)} className="mt-auto w-full bg-white text-duo-red font-extrabold uppercase py-3 rounded-xl border-2 border-duo-grayBorder shadow-[0_4px_0_0_#e5e5e5] hover:bg-red-50 hover:border-red-200 active:shadow-none active:translate-y-[4px] transition-all flex items-center justify-center">
+                                                                    <button onClick={() => cancelBookingFromList(b.cartName, b.slotId, b.className, b.bookingId)} className="mt-auto w-full bg-white text-duo-red font-extrabold uppercase py-3 rounded-xl border-2 border-duo-grayBorder shadow-[0_4px_0_0_#e5e5e5] hover:bg-red-50 hover:border-red-200 active:shadow-none active:translate-y-[4px] transition-all flex items-center justify-center">
                                                                         <i className="fa-solid fa-trash-can mr-2"></i> Cancel
                                                                     </button>
                                                                 ) : (
@@ -2609,11 +2784,17 @@
                                                                 {currentDays.map((day, dayIdx) => {
                                                                     const baseSlotId = buildSlotId(selectedWeek, dayIdx, period.id);
                                                                     const myCartsThisSlot = [];
+                                                                    const myEmailLower = (currentUser.email || '').trim().toLowerCase();
                                                                     Object.entries(cartData).forEach(([cName, cData]) => {
-                                                                        Object.entries(cData.schedule || {}).forEach(([slotId, booking]) => {
-                                                                            if (getBaseSlotId(slotId) === baseSlotId && booking.ownerEmail === currentUser.email) {
-                                                                                myCartsThisSlot.push({ cName, slotId, booking, areaLabel: parseSlotId(slotId)?.areaLabel || '' });
-                                                                            }
+                                                                        Object.keys(cData.schedule || {}).forEach(slotId => {
+                                                                            if (getBaseSlotId(slotId) !== baseSlotId) return;
+                                                                            const list = getSlotBookings(cData.schedule, slotId);
+                                                                            list.forEach(booking => {
+                                                                                const ownerLower = (booking.ownerEmail || '').toLowerCase();
+                                                                                if (ownerLower === myEmailLower) {
+                                                                                    myCartsThisSlot.push({ cName, slotId, booking, areaLabel: parseSlotId(slotId)?.areaLabel || '' });
+                                                                                }
+                                                                            });
                                                                         });
                                                                     });
                                                                     
@@ -2625,7 +2806,7 @@
                                                                                         const stat = booking.status;
                                                                                         const isPending = stat === 'pending';
                                                                                         return (
-                                                                                            <div key={`${cName}-${slotId}`} className={`${isPending ? 'bg-duo-yellow shadow-[0_3px_0_0_#e5b400] hover:bg-[#e5b400]' : 'bg-duo-green shadow-[0_3px_0_0_#58a700] hover:bg-[#46a302]'} text-white rounded-xl p-2 flex flex-col justify-center items-center cursor-pointer active:translate-y-[3px] active:shadow-none`} onClick={() => cancelBookingFromList(cName, slotId, booking.className)}>
+                                                                                            <div key={`${cName}-${slotId}-${booking.bookingId || 'main'}`} className={`${isPending ? 'bg-duo-yellow shadow-[0_3px_0_0_#e5b400] hover:bg-[#e5b400]' : 'bg-duo-green shadow-[0_3px_0_0_#58a700] hover:bg-[#46a302]'} text-white rounded-xl p-2 flex flex-col justify-center items-center cursor-pointer active:translate-y-[3px] active:shadow-none`} onClick={() => cancelBookingFromList(cName, slotId, booking.className, booking.bookingId)}>
                                                                                                 <span className="font-extrabold text-xs truncate w-full">{cName}{areaLabel ? ` · ${areaLabel}` : ''}</span>
                                                                                                 <span className="text-[10px] bg-black/20 px-1.5 rounded-md truncate">
                                                                                                     {isPending ? (
@@ -2832,14 +3013,17 @@
                                                         
                                                         {currentDays.map((day, dayIdx) => {
                                                             const slotId = buildSlotId(selectedWeek, dayIdx, period.id);
-                                                            const bookingInfo = cartData[selectedCart]?.schedule?.[slotId];
+                                                            const slotBookings = getSlotBookings(cartData[selectedCart]?.schedule, slotId);
+                                                            const bookingInfo = getPrimaryBooking(cartData[selectedCart]?.schedule, slotId);
+                                                            const competingCount = slotBookings.length; // 含 approved / pending 全部
                                                             const isMyBooking = bookingInfo && bookingInfo.ownerEmail === currentUser.email;
                                                             const isSelectedBatch = batchSelection.some(s => s.slotId === slotId);
                                                             const slotLock = getLockForSlot(selectedCart, selectedWeek, dayIdx, period.id);
                                                             const venueAreas = getVenueAreas(selectedCart);
 
                                                             // 顯示優先順序：
-                                                                //   1) 有預約 → 顯示預約（即使有鎖定，預約都是先顯示）
+                                                                //   1) 有預約 → 顯示主要預約（approved 優先；無 approved 則顯示第一筆 pending）
+                                                                //      若同 slot 還有其他競爭預約，會在角落顯示 +N 計數
                                                                 //   2) 有鎖定且無預約 → 顯示鎖定，但仍可點擊去申請（建立 pending）
                                                                 //   3) 都沒有 → 空格可登記
                                                                 const lockOnlyWithoutBooking = slotLock && !bookingInfo;
@@ -2864,14 +3048,16 @@
                                                                         <div className="grid grid-cols-2 gap-1 h-[72px]">
                                                                             {venueAreas.map(area => {
                                                                                 const areaSlotId = buildSlotId(selectedWeek, dayIdx, period.id, area.id);
-                                                                                const areaBooking = cartData[selectedCart]?.schedule?.[areaSlotId];
+                                                                                const areaBookings = getSlotBookings(cartData[selectedCart]?.schedule, areaSlotId);
+                                                                                const areaBooking = getPrimaryBooking(cartData[selectedCart]?.schedule, areaSlotId);
+                                                                                const areaCompeting = areaBookings.length;
                                                                                 const areaIsMyBooking = areaBooking && areaBooking.ownerEmail === currentUser.email;
                                                                                 const areaIsSelectedBatch = batchSelection.some(s => s.slotId === areaSlotId);
                                                                                 return areaBooking ? (
                                                                                     <div
                                                                                         key={area.id}
                                                                                         onClick={() => (!isBatchMode && (areaIsMyBooking || isAdmin || canApproveCart(selectedCart))) && handleSlotClick(dayIdx, period.id, areaBooking, area.id)}
-                                                                                        className={`rounded-xl flex flex-col items-center justify-center px-1.5 py-1 transition-all min-w-0 ${
+                                                                                        className={`relative rounded-xl flex flex-col items-center justify-center px-1.5 py-1 transition-all min-w-0 ${
                                                                                             isBatchMode ? 'bg-gray-100 text-gray-400 border-2 border-duo-grayBorder opacity-50 cursor-not-allowed' :
                                                                                             areaBooking.status === 'pending'
                                                                                                 ? 'bg-duo-yellow text-white shadow-[0_3px_0_0_#e5b400] cursor-pointer hover:bg-[#e5b400] active:shadow-none active:translate-y-[3px]'
@@ -2879,10 +3065,14 @@
                                                                                                     ? 'bg-duo-green text-white shadow-[0_3px_0_0_#58a700] cursor-pointer hover:bg-[#46a302] active:shadow-none active:translate-y-[3px]'
                                                                                                     : 'bg-gray-100 text-gray-400 border-2 border-duo-grayBorder cursor-not-allowed opacity-80'
                                                                                         }`}
+                                                                                        title={areaCompeting > 1 ? `此時段共有 ${areaCompeting} 筆申請（含此筆）` : ''}
                                                                                     >
                                                                                         <div className="text-[10px] font-extrabold leading-none mb-0.5">{area.label}</div>
                                                                                         <i className={`fa-solid ${areaBooking.status === 'pending' ? 'fa-hourglass-half' : 'fa-circle-check'} text-xs`}></i>
                                                                                         <span className="font-extrabold text-[10px] truncate w-full text-center leading-tight mt-0.5">{areaBooking.name}</span>
+                                                                                        {areaCompeting > 1 && (
+                                                                                            <span className="absolute top-0.5 right-0.5 bg-duo-redDark text-white text-[9px] font-extrabold px-1 rounded">+{areaCompeting - 1}</span>
+                                                                                        )}
                                                                                     </div>
                                                                                 ) : (
                                                                                     <div
@@ -2906,7 +3096,8 @@
                                                                         </div>
                                                                     ) : bookingInfo ? (
                                                                         <div onClick={() => (!isBatchMode && (isMyBooking || isAdmin || canApproveCart(selectedCart))) && handleSlotClick(dayIdx, period.id, bookingInfo)}
-                                                                            className={`w-full h-[72px] rounded-2xl flex flex-col items-center justify-center p-2 transition-all ${
+                                                                            title={competingCount > 1 ? `此時段共有 ${competingCount} 筆申請（含此筆主要顯示）` : ''}
+                                                                            className={`relative w-full h-[72px] rounded-2xl flex flex-col items-center justify-center p-2 transition-all ${
                                                                                 isBatchMode ? 'bg-gray-100 text-gray-400 border-2 border-duo-grayBorder opacity-50 cursor-not-allowed' :
                                                                                 bookingInfo.status === 'pending'
                                                                                     ? 'bg-duo-yellow text-white shadow-[0_4px_0_0_#e5b400] cursor-pointer hover:bg-[#e5b400] active:shadow-none active:translate-y-[4px]'
@@ -2922,6 +3113,11 @@
                                                                             <span className="text-[11px] font-bold bg-black/10 px-2 py-0.5 rounded-full mt-1 truncate max-w-[90%]">
                                                                                 {bookingInfo.status === 'pending' ? '審核中' : '預約成功'}
                                                                             </span>
+                                                                            {competingCount > 1 && (
+                                                                                <span className="absolute top-1 right-1 bg-duo-redDark text-white text-[10px] font-extrabold px-1.5 py-0.5 rounded-md shadow">
+                                                                                    🔁 +{competingCount - 1}
+                                                                                </span>
+                                                                            )}
                                                                         </div>
                                                                     ) : (
                                                                         <div onClick={() => handleSlotClick(dayIdx, period.id, null)}
@@ -3572,9 +3768,15 @@
                 </td>
                 {currentDays.map((day, dayIdx) => {
                     const baseSlotId = buildSlotId(selectedWeek, dayIdx, period.id);
-                    const bookings = Object.entries(cartData[cartName]?.schedule || {})
-                        .filter(([slotId]) => getBaseSlotId(slotId) === baseSlotId)
-                        .map(([slotId, info]) => ({ ...info, areaLabel: parseSlotId(slotId)?.areaLabel || info.areaLabel || '' }));
+                    // 列印只取每個 area 的「主要 booking」（approved 優先；無 approved 取第一筆 pending）
+                    // 多筆競爭預約的細節留在 UI 內審核，不在列印頁顯示
+                    const bookings = Object.keys(cartData[cartName]?.schedule || {})
+                        .filter(slotId => getBaseSlotId(slotId) === baseSlotId)
+                        .map(slotId => {
+                            const primary = getPrimaryBooking(cartData[cartName]?.schedule, slotId);
+                            return primary ? { ...primary, areaLabel: parseSlotId(slotId)?.areaLabel || primary.areaLabel || '' } : null;
+                        })
+                        .filter(Boolean);
                     const printLock = getLockForSlot(cartName, selectedWeek, dayIdx, period.id);
 
                     return (
