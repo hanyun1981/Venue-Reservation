@@ -255,8 +255,16 @@
             const [selectedCart, setSelectedCart] = useState(null);
             const [adminTab, setAdminTab] = useState('carts');
             
-            const [semesterConfig, setSemesterConfig] = useState({ startDate: '2026-02-23', totalWeeks: 19, maxAdvanceWeeks: 2 });
-            const [tempSemesterConfig, setTempSemesterConfig] = useState({ ...semesterConfig });
+            // 🔧 學期設定已移除：改用固定虛擬框架支撐 week-based slot ID
+            // 2020-01-06 是星期一，作為「Week 1 起始日」基準。
+            // totalWeeks = 520 (~10 年) 等同無限制，避免任何使用上的卡關。
+            // maxAdvanceWeeks = 520 等同無提前預約限制。
+            // 全年度任何日期都可預約。
+            const semesterConfig = useMemo(() => ({
+                startDate: '2020-01-06',
+                totalWeeks: 520,
+                maxAdvanceWeeks: 520
+            }), []);
             const [emailConfig, setEmailConfig] = useState({
                 webAppUrl: GAS_CONFIG.WEB_APP_URL,
                 appUrl: GAS_CONFIG.APP_URL
@@ -452,10 +460,7 @@
                 const unsubSettings = dbRefs.fb.onSnapshot(dbRefs.getDocRef('settings', 'main'), (snap) => {
                     if (snap.exists()) {
                         const data = snap.data();
-                        if (data.semesterConfig) {
-                            setSemesterConfig({ ...data.semesterConfig, maxAdvanceWeeks: data.semesterConfig.maxAdvanceWeeks || 2 });
-                            setTempSemesterConfig({ ...data.semesterConfig, maxAdvanceWeeks: data.semesterConfig.maxAdvanceWeeks || 2 });
-                        }
+                        // semesterConfig 不再從 Firestore 讀取，使用固定常數（全年度可預約）
                         if (data.allowSaturday !== undefined) setAllowSaturday(data.allowSaturday);
                         if (data.emailConfig) {
                             const nextEmailConfig = {
@@ -474,7 +479,6 @@
                         }
                     } else {
                         dbRefs.fb.setDoc(dbRefs.getDocRef('settings', 'main'), {
-                            semesterConfig: { startDate: '2026-02-23', totalWeeks: 19, maxAdvanceWeeks: 2 },
                             emailConfig: {
                                 webAppUrl: GAS_CONFIG.WEB_APP_URL,
                                 appUrl: GAS_CONFIG.APP_URL
@@ -1274,13 +1278,6 @@
                 }
             };
 
-            const handleSemesterConfigSave = async (e) => {
-                e.preventDefault();
-                await dbRefs.fb.setDoc(dbRefs.getDocRef('settings', 'main'), { semesterConfig: tempSemesterConfig }, { merge: true });
-                addLog("Update Config", "System", `Start Date: ${tempSemesterConfig.startDate}, Total Weeks: ${tempSemesterConfig.totalWeeks}, Advance: ${tempSemesterConfig.maxAdvanceWeeks}W`);
-                showAlert("Semester configuration updated successfully!");
-            };
-
             const handleEmailConfigSave = async (e) => {
                 e.preventDefault();
                 const nextEmailConfig = {
@@ -1396,7 +1393,7 @@
                     weeks: Number(formData.get('weeks'))
                 };
 
-                if (!lockData.cartName) { showAlert("請選擇一個 Cart。"); return; }
+                if (!lockData.cartName) { showAlert("請選擇一個場地。"); return; }
                 if (lockData.weeks < 1) { showAlert("持續週數必須至少 1 週。"); return; }
 
                 try {
@@ -1662,22 +1659,15 @@
             }, [isAdmin, cartData, currentUser]);
 
             const handleSlotClick = (dayIdx, periodId, existingBooking, areaId = 'main') => {
+                // 鎖定時段：不再直接擋下，仍允許申請（會強制變成 pending 走審核流程）
                 const lock = getLockForSlot(selectedCart, selectedWeek, dayIdx, periodId);
-                if (lock) {
-                    showAlert(`🔒 此時段已被鎖定\n\n名稱：${lock.name}\n期間：第 ${lock.startWeek} - ${lock.startWeek + lock.weeks - 1} 週`);
-                    return;
-                }
 
                 const isPastSlot = selectedWeek < currentRealWeek || (selectedWeek === currentRealWeek && dayIdx < currentRealDayIdx);
 
-                const isPastLimit = !isAdmin && (selectedWeek > currentRealWeek + (semesterConfig.maxAdvanceWeeks || 2));
-                if (isPastLimit) {
-                    showAlert(`⚠️ Booking Limit Exceeded\n\nTo ensure fairness, the system only allows bookings up to ${semesterConfig.maxAdvanceWeeks || 2} week(s) in advance.\nPlease try again closer to your desired date!`);
-                    return;
-                }
+                // 提前預約限制已移除 — 全年度任何日期都可預約
 
                 if (existingBooking) {
-                    setBookingModal({ isOpen: true, dayIdx, periodId, areaId, existingBooking, isEditing: false, isBatch: false, isPast: isPastSlot });
+                    setBookingModal({ isOpen: true, dayIdx, periodId, areaId, existingBooking, isEditing: false, isBatch: false, isPast: isPastSlot, lock });
                 } else {
                     if (isPastSlot && !isAdmin) {
                         showAlert("⚠️ Cannot book slots in the past!");
@@ -1692,14 +1682,14 @@
 
                     if (isBatchMode) {
                         const slotId = buildSlotId(selectedWeek, dayIdx, periodId, areaId);
-                        setBatchSelection(prev => 
-                            prev.some(s => s.slotId === slotId) 
-                                ? prev.filter(s => s.slotId !== slotId) 
-                                : [...prev, { dayIdx, periodId, areaId, slotId }]
+                        setBatchSelection(prev =>
+                            prev.some(s => s.slotId === slotId)
+                                ? prev.filter(s => s.slotId !== slotId)
+                                : [...prev, { dayIdx, periodId, areaId, slotId, lock }]
                         );
                     } else {
                         setBookForm({ classType: currentUser.defaultClass, customClass: currentUser.customClass });
-                        setBookingModal({ isOpen: true, dayIdx, periodId, areaId, existingBooking: null, isEditing: false, isBatch: false, isPast: false });
+                        setBookingModal({ isOpen: true, dayIdx, periodId, areaId, existingBooking: null, isEditing: false, isBatch: false, isPast: false, lock });
                     }
                 }
             };
@@ -1720,6 +1710,26 @@
                 const needsApproval = !isAdmin;
                 const initialStatus = needsApproval ? 'pending' : 'approved';
 
+                // 🔒 鎖定衝突：仍可登記，但會記錄鎖定資訊讓審核者看到
+                //    super admin 自己登記時也維持 needsApproval；以下 lock 資訊會塞進 booking 記錄裡
+                let hasAnyLockedSlot = false;
+                const slotLockMap = {};
+                for (const slot of slotsToBook) {
+                    const slotLock = getLockForSlot(selectedCart, selectedWeek, slot.dayIdx, slot.periodId);
+                    if (slotLock) {
+                        hasAnyLockedSlot = true;
+                        slotLockMap[slot.slotId] = {
+                            id: slotLock.id,
+                            name: slotLock.name,
+                            startWeek: slotLock.startWeek,
+                            weeks: slotLock.weeks
+                        };
+                    }
+                }
+                // 鎖定 slot 一律走審核流程（即使 isAdmin 也要明確核准才會覆寫鎖定），確保流程一致
+                const effectiveNeedsApproval = needsApproval || hasAnyLockedSlot;
+                const effectiveInitialStatus = effectiveNeedsApproval ? 'pending' : 'approved';
+
                 try {
                     await dbRefs.fb.runTransaction(dbRefs.db, async (transaction) => {
                         const cartDoc = await transaction.get(cartRef);
@@ -1729,28 +1739,28 @@
                         const currentSchedule = currentData.schedule || {};
 
                         for (const slot of slotsToBook) {
-                            if (getLockForSlot(selectedCart, selectedWeek, slot.dayIdx, slot.periodId)) {
-                                throw "SLOT_LOCKED";
-                            }
                             if (currentSchedule[slot.slotId]) {
                                 throw "SLOT_ALREADY_TAKEN";
                             }
+                            const lockInfo = slotLockMap[slot.slotId];
                             currentSchedule[slot.slotId] = {
-                                name: currentUser.name, email: currentUser.email, 
+                                name: currentUser.name, email: currentUser.email,
                                 className: finalClass, ownerEmail: currentUser.email,
                                 areaId: slot.areaId || 'main',
                                 areaLabel: getSlotAreaLabel(slot.areaId),
-                                status: initialStatus,
-                                createdAt: Date.now()
+                                status: effectiveInitialStatus,
+                                createdAt: Date.now(),
+                                ...(lockInfo ? { conflictsWithLock: lockInfo, overridesLock: false } : {})
                             };
                         }
                         transaction.update(cartRef, { schedule: currentSchedule });
                     });
 
-                    const details = slotsToBook.length === 1 
-                        ? `Week ${selectedWeek} ${currentDays[slotsToBook[0].dayIdx]} P${slotsToBook[0].periodId}${getSlotAreaLabel(slotsToBook[0].areaId) ? ` ${getSlotAreaLabel(slotsToBook[0].areaId)}` : ''} (${finalClass}) [${initialStatus}]`
-                        : `Batch booked ${slotsToBook.length} slots for Week ${selectedWeek} (${finalClass}) [${initialStatus}]`;
-                    
+                    const lockTag = hasAnyLockedSlot ? ' [conflicts with lock]' : '';
+                    const details = slotsToBook.length === 1
+                        ? `Week ${selectedWeek} ${currentDays[slotsToBook[0].dayIdx]} P${slotsToBook[0].periodId}${getSlotAreaLabel(slotsToBook[0].areaId) ? ` ${getSlotAreaLabel(slotsToBook[0].areaId)}` : ''} (${finalClass}) [${effectiveInitialStatus}]${lockTag}`
+                        : `Batch booked ${slotsToBook.length} slots for Week ${selectedWeek} (${finalClass}) [${effectiveInitialStatus}]${lockTag}`;
+
                     addLog("Add Booking", selectedCart, details);
                     setBookingModal({ isOpen: false, dayIdx: null, periodId: null, existingBooking: null, isEditing: false, isBatch: false });
                     setBatchSelection([]);
@@ -1758,7 +1768,7 @@
 
                     // 🔧 寄信通知最高管理員與該場地審核者（只在 pending 時寄）
                     // 每筆 slot 各自附「核准 / 退回」一鍵按鈕，由 GAS 端的 buildActionUrl() 生成連結
-                    if (needsApproval) {
+                    if (effectiveNeedsApproval) {
                         sendApprovalEmail({
                             managerEmails: reviewManagerEmails,
                             cartName: selectedCart,
@@ -1767,21 +1777,25 @@
                             className: finalClass,
                             slots: slotsToBook.map(slot => {
                                 const pinfo = periods.find(p => String(p.id) === String(slot.periodId));
+                                const lockInfo = slotLockMap[slot.slotId];
                                 return {
                                     slotId: slot.slotId,
                                     week: selectedWeek,
                                     dayName: currentDays[slot.dayIdx],
-                                    periodName: `${pinfo ? pinfo.name : `Period ${slot.periodId}`}${getSlotAreaLabel(slot.areaId) ? ` · ${getSlotAreaLabel(slot.areaId)}` : ''}`,
-                                    slotDate: getDateForDayIdx(selectedWeek, slot.dayIdx)
+                                    periodName: `${pinfo ? pinfo.name : `Period ${slot.periodId}`}${getSlotAreaLabel(slot.areaId) ? ` · ${getSlotAreaLabel(slot.areaId)}` : ''}${lockInfo ? `（與鎖定衝突：${lockInfo.name}）` : ''}`,
+                                    slotDate: getDateForDayIdx(selectedWeek, slot.dayIdx),
+                                    lockConflict: lockInfo || null
                                 };
                             })
                         });
-                        showAlert(`✅ 預約已送出！\n\n狀態：未審核（等待最高管理員或場地審核者核准）\n審核結果將反映在「My Bookings」頁面，並會以 email 同步通知。`);
+                        const lockMsg = hasAnyLockedSlot
+                            ? `\n\n⚠️ 你選的時段包含被鎖定的格子，審核通過後該預約會覆寫鎖定顯示。`
+                            : '';
+                        showAlert(`✅ 預約已送出！\n\n狀態：未審核（等待最高管理員或場地審核者核准）\n審核結果將反映在「My Bookings」頁面，並會以 email 同步通知。${lockMsg}`);
                     }
-                    
+
                 } catch (error) {
                     if (error === "SLOT_ALREADY_TAKEN") showAlert("慢了一步！你選的時段中，有部分已被別人搶走囉，請重新選擇。");
-                    else if (error === "SLOT_LOCKED") showAlert("🔒 你選的時段中包含已被鎖定的格子，無法預約。");
                     else if (error === "CART_NOT_FOUND") showAlert("找不到該設備，可能已被管理員刪除。");
                     else showAlert("預約發生錯誤，請稍後檢查網路連線再試。");
                     setBookingModal({ isOpen: false, dayIdx: null, periodId: null, existingBooking: null, isEditing: false, isBatch: false });
@@ -1843,7 +1857,15 @@
                         bookingDetail = { ...schedule[slotId] };
 
                         if (decision === 'approved') {
-                            schedule[slotId] = { ...schedule[slotId], status: 'approved', reviewedAt: Date.now(), reviewedBy: currentUser.email };
+                            // 若此 booking 與鎖定衝突，核准等同於「覆寫鎖定」
+                            const wasLockConflict = !!schedule[slotId].conflictsWithLock;
+                            schedule[slotId] = {
+                                ...schedule[slotId],
+                                status: 'approved',
+                                reviewedAt: Date.now(),
+                                reviewedBy: currentUser.email,
+                                ...(wasLockConflict ? { overridesLock: true } : {})
+                            };
                             transaction.update(cartRef, { schedule });
                         } else {
                             // 退回直接刪除
@@ -2389,9 +2411,6 @@
                                     <span className="text-xs font-bold text-gray-500 bg-white border-2 border-duo-grayBorder rounded-lg px-3 py-1.5">
                                         {currentDays[selectedDayIdx]} · 該週 ({getWeekDateRange(selectedWeek, true)})
                                     </span>
-                                    {!isAdmin && selectedWeek > currentRealWeek + (semesterConfig.maxAdvanceWeeks || 2) && (
-                                        <span className="text-xs font-bold text-duo-red bg-red-50 px-2 py-1 rounded-lg border border-red-200"><i className="fa-solid fa-lock mr-1"></i>超過提前預約上限</span>
-                                    )}
                                 </div>
                                 <div className="text-xs font-extrabold text-duo-text/60 uppercase tracking-wider">
                                     <i className="fa-solid fa-calendar-week mr-1 text-duo-green"></i> 開放預約：週一 - 週日
@@ -2819,16 +2838,27 @@
                                                             const slotLock = getLockForSlot(selectedCart, selectedWeek, dayIdx, period.id);
                                                             const venueAreas = getVenueAreas(selectedCart);
 
-                                                            return (
+                                                            // 顯示優先順序：
+                                                                //   1) 有預約 → 顯示預約（即使有鎖定，預約都是先顯示）
+                                                                //   2) 有鎖定且無預約 → 顯示鎖定，但仍可點擊去申請（建立 pending）
+                                                                //   3) 都沒有 → 空格可登記
+                                                                const lockOnlyWithoutBooking = slotLock && !bookingInfo;
+
+                                                                return (
                                                                 <td key={dayIdx} className="p-2 align-middle">
-                                                                    {slotLock ? (
+                                                                    {lockOnlyWithoutBooking ? (
                                                                         <div
-                                                                            onClick={() => showAlert(`🔒 此時段已被鎖定\n\n名稱：${slotLock.name}\n期間：第 ${slotLock.startWeek} - ${slotLock.startWeek + slotLock.weeks - 1} 週`)}
-                                                                            title={`${slotLock.name} (第 ${slotLock.startWeek}-${slotLock.startWeek + slotLock.weeks - 1} 週)`}
-                                                                            className="w-full h-[72px] rounded-2xl flex flex-col items-center justify-center p-2 bg-duo-red/10 border-2 border-duo-red text-duo-red cursor-not-allowed"
+                                                                            onClick={() => handleSlotClick(dayIdx, period.id, null)}
+                                                                            title={`${slotLock.name} — 已被鎖定但仍可申請（會送審核）`}
+                                                                            className={`w-full h-[72px] rounded-2xl flex flex-col items-center justify-center p-2 cursor-pointer transition-all border-2 ${
+                                                                                isSelectedBatch
+                                                                                    ? 'bg-duo-yellow/30 border-duo-yellow text-duo-yellowDark'
+                                                                                    : 'bg-duo-red/10 border-duo-red text-duo-red hover:bg-duo-red/20 active:translate-y-[2px]'
+                                                                            }`}
                                                                         >
-                                                                            <i className="fa-solid fa-lock text-base mb-1"></i>
-                                                                            <span className="font-extrabold text-xs truncate w-full text-center leading-tight">{slotLock.name}</span>
+                                                                            <i className="fa-solid fa-lock text-base mb-0.5"></i>
+                                                                            <span className="font-extrabold text-[11px] truncate w-full text-center leading-tight">{slotLock.name}</span>
+                                                                            <span className="text-[9px] font-bold bg-white/70 px-1.5 py-0.5 rounded mt-0.5">點擊申請審核</span>
                                                                         </div>
                                                                     ) : isActivityCenter(selectedCart) && !bookingInfo ? (
                                                                         <div className="grid grid-cols-2 gap-1 h-[72px]">
@@ -3098,18 +3128,6 @@
                                         {adminTab === 'settings' && (
                                             <div className="flex flex-col lg:flex-row gap-8">
                                                 <div className="flex-1">
-                                                    <h3 className="text-2xl font-extrabold text-duo-text mb-6 border-b-2 border-duo-grayBorder pb-4">Semester Config</h3>
-                                                    <div className="bg-duo-grayLight border-2 border-duo-grayBorder rounded-[2rem] p-6 mb-8">
-                                                        <form onSubmit={handleSemesterConfigSave} className="space-y-4">
-                                                            <div><label className="block text-xs font-extrabold text-gray-500 uppercase tracking-wider mb-2">Start Date (Week 1)</label><input required type="date" value={tempSemesterConfig.startDate} onChange={e => setTempSemesterConfig({...tempSemesterConfig, startDate: e.target.value})} className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold text-duo-text" /></div>
-                                                            <div className="grid grid-cols-2 gap-4">
-                                                                <div><label className="block text-xs font-extrabold text-gray-500 uppercase tracking-wider mb-2">Total Weeks</label><input required type="number" min="1" max="52" value={tempSemesterConfig.totalWeeks} onChange={e => setTempSemesterConfig({...tempSemesterConfig, totalWeeks: Number(e.target.value)})} className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold text-duo-text" /></div>
-                                                                <div><label className="block text-xs font-extrabold text-gray-500 uppercase tracking-wider mb-2">Max Advance (Weeks)</label><input required type="number" min="1" max="52" value={tempSemesterConfig.maxAdvanceWeeks || 2} onChange={e => setTempSemesterConfig({...tempSemesterConfig, maxAdvanceWeeks: Number(e.target.value)})} title="老師最多可以提前幾週預約" className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold text-duo-text" /></div>
-                                                            </div>
-                                                            <button type="submit" className="w-full mt-2 bg-duo-green text-white font-extrabold uppercase py-3 rounded-2xl shadow-duo-green active:shadow-none active:translate-y-[4px] transition-all tracking-wider">Save Config</button>
-                                                        </form>
-                                                    </div>
-
                                                     {/* === 修復白名單大小寫 === */}
                                                     <h3 className="text-2xl font-extrabold text-duo-text mb-6 border-b-2 border-duo-grayBorder pb-4"><i className="fa-solid fa-screwdriver-wrench text-duo-yellow mr-2"></i> 白名單修復工具</h3>
                                                     <div className="bg-duo-grayLight border-2 border-duo-grayBorder rounded-[2rem] p-6 mb-8">
@@ -3123,6 +3141,68 @@
                                                         <p className="text-[11px] font-bold text-gray-400 mt-3 leading-snug">
                                                             ℹ️ 安全操作：只搬移不會刪資料，重複按沒副作用。<br/>
                                                             執行完會列出哪些 Email 被轉小寫了。之後再加新 user 也會自動小寫，不需要再修了。
+                                                        </p>
+                                                    </div>
+
+                                                    {/* === 批次重複預約 === */}
+                                                    <h3 className="text-2xl font-extrabold text-duo-text mb-6 border-b-2 border-duo-grayBorder pb-4"><i className="fa-solid fa-calendar-plus text-duo-green mr-2"></i> 批次建立重複預約</h3>
+                                                    <div className="bg-duo-grayLight border-2 border-duo-grayBorder rounded-[2rem] p-6 mb-8">
+                                                        <p className="text-sm font-bold text-gray-500 mb-3 leading-relaxed">
+                                                            一次性把每週的固定使用時段全部寫進 Firestore，狀態為「已核准」，擁有者為超級管理員。<br/>
+                                                            <span className="text-duo-yellowDark">⚠️ 已被預約／鎖定的時段會自動跳過。</span>
+                                                        </p>
+
+                                                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
+                                                            <div>
+                                                                <label className="block text-xs font-extrabold text-gray-500 uppercase tracking-wider mb-1">場地</label>
+                                                                <select value={batchBookingForm.cartName} onChange={e => setBatchBookingForm({...batchBookingForm, cartName: e.target.value})} className="w-full px-4 py-2 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold text-sm">
+                                                                    {sortedAllCarts.map(([n]) => <option key={n} value={n}>{n}</option>)}
+                                                                </select>
+                                                            </div>
+                                                            <div>
+                                                                <label className="block text-xs font-extrabold text-gray-500 uppercase tracking-wider mb-1">起始日期</label>
+                                                                <input type="date" value={batchBookingForm.startDate} onChange={e => setBatchBookingForm({...batchBookingForm, startDate: e.target.value})} className="w-full px-4 py-2 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold text-sm" />
+                                                            </div>
+                                                            <div>
+                                                                <label className="block text-xs font-extrabold text-gray-500 uppercase tracking-wider mb-1">結束日期</label>
+                                                                <input type="date" value={batchBookingForm.endDate} onChange={e => setBatchBookingForm({...batchBookingForm, endDate: e.target.value})} className="w-full px-4 py-2 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold text-sm" />
+                                                            </div>
+                                                        </div>
+
+                                                        <div className="bg-white border-2 border-duo-grayBorder rounded-xl p-3 mb-4 text-[11px] font-bold leading-relaxed">
+                                                            <div className="font-extrabold text-duo-green mb-2">每週重複規則：</div>
+                                                            <table className="w-full text-xs">
+                                                                <thead className="text-gray-400 uppercase">
+                                                                    <tr>
+                                                                        <th className="text-left p-1">星期</th>
+                                                                        <th className="text-left p-1">時段</th>
+                                                                        <th className="text-left p-1">節次</th>
+                                                                        <th className="text-left p-1">類別</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody className="text-gray-700">
+                                                                    {BATCH_BOOKING_PRESETS.map((p, i) => (
+                                                                        <tr key={i} className="border-t border-gray-100">
+                                                                            <td className="p-1 font-extrabold">{currentDays[p.dayIdx]}</td>
+                                                                            <td className="p-1">{p.timeLabel}</td>
+                                                                            <td className="p-1 text-gray-500">{p.periodIds.map(pid => (periods.find(pp => String(pp.id) === String(pid)) || {}).name || pid).join(', ')}</td>
+                                                                            <td className="p-1 text-duo-blue font-extrabold">{p.className}</td>
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                            </table>
+                                                            <div className="mt-2 text-duo-greenDark">
+                                                                預覽：日期範圍內共需建立 <strong>{computeBatchBookingSlots(batchBookingForm).length}</strong> 個 slot
+                                                            </div>
+                                                        </div>
+
+                                                        <button onClick={handleExecuteBatchBooking} className="w-full bg-duo-green text-white font-extrabold uppercase py-3 rounded-2xl shadow-duo-green active:shadow-none active:translate-y-[4px] transition-all tracking-wider">
+                                                            <i className="fa-solid fa-bolt mr-2"></i> 執行批次建立
+                                                        </button>
+                                                        <p className="text-[11px] font-bold text-gray-400 mt-3 leading-snug">
+                                                            ℹ️ 預設場地是「活動中心」（綜合場地，最大），可改成其他場地。<br/>
+                                                            ℹ️ 若需要把同一段時間在多個場地都建立，請改場地後重新按執行。<br/>
+                                                            ℹ️ 建立後可在「My Bookings」或排程表上看到，也可手動取消個別 slot。
                                                         </p>
                                                     </div>
 
@@ -3583,13 +3663,53 @@
                                         <i className="fa-solid fa-location-dot text-xl mb-1 block"></i>
                                         {selectedCart} <br/>
                                         <span className="text-xs text-duo-blue/70">
-                                            {bookingModal.isBatch 
+                                            {bookingModal.isBatch
                                                 ? `Wk ${selectedWeek} • Booking ${batchSelection.length} Slots`
                                                 : `Wk ${selectedWeek} • ${currentDays[bookingModal.dayIdx]} • P${bookingModal.periodId}${getSlotAreaLabel(bookingModal.areaId || bookingModal.existingBooking?.areaId) ? ` • ${getSlotAreaLabel(bookingModal.areaId || bookingModal.existingBooking?.areaId)}` : ''}`
                                             }
                                         </span>
                                     </div>
-                                    
+
+                                    {/* 鎖定衝突警告：新申請時 */}
+                                    {!bookingModal.existingBooking && (() => {
+                                        const lockedSlots = bookingModal.isBatch
+                                            ? batchSelection.filter(s => s.lock).map(s => ({ lock: s.lock, dayIdx: s.dayIdx, periodId: s.periodId }))
+                                            : (bookingModal.lock ? [{ lock: bookingModal.lock, dayIdx: bookingModal.dayIdx, periodId: bookingModal.periodId }] : []);
+                                        if (lockedSlots.length === 0) return null;
+                                        return (
+                                            <div className="bg-red-50 border-2 border-duo-red rounded-2xl p-4 mb-4 text-sm font-bold text-duo-redDark">
+                                                <div className="flex items-center mb-1.5">
+                                                    <i className="fa-solid fa-lock mr-2"></i>
+                                                    <span className="font-extrabold">此時段被鎖定（{lockedSlots[0].lock.name}）</span>
+                                                </div>
+                                                <p className="text-xs leading-relaxed">
+                                                    你仍可送出申請，系統會通知場地審查者。<br/>
+                                                    若審核通過，此預約將會覆寫鎖定顯示。
+                                                </p>
+                                            </div>
+                                        );
+                                    })()}
+
+                                    {/* 鎖定衝突資訊：檢視已存在的預約時 */}
+                                    {bookingModal.existingBooking?.conflictsWithLock && (
+                                        <div className={`border-2 rounded-2xl p-4 mb-4 text-sm font-bold ${bookingModal.existingBooking.overridesLock ? 'bg-green-50 border-duo-green text-duo-greenDark' : 'bg-red-50 border-duo-red text-duo-redDark'}`}>
+                                            <div className="flex items-center mb-1.5">
+                                                <i className={`fa-solid ${bookingModal.existingBooking.overridesLock ? 'fa-shield-halved' : 'fa-lock'} mr-2`}></i>
+                                                <span className="font-extrabold">
+                                                    {bookingModal.existingBooking.overridesLock
+                                                        ? `已覆寫鎖定（${bookingModal.existingBooking.conflictsWithLock.name}）`
+                                                        : `與鎖定衝突（${bookingModal.existingBooking.conflictsWithLock.name}）`}
+                                                </span>
+                                            </div>
+                                            <p className="text-xs leading-relaxed">
+                                                {bookingModal.existingBooking.overridesLock
+                                                    ? '審核者已核准此申請，預約凌駕於鎖定之上。'
+                                                    : '審核通過後，此預約將會覆寫鎖定顯示。'}
+                                            </p>
+                                        </div>
+                                    )}
+
+
                                     {bookingModal.existingBooking ? (
                                         bookingModal.isEditing ? (
                                             <div className="space-y-4">
@@ -3957,7 +4077,7 @@
                                         <input required name="name" defaultValue={lockModal.data?.name || ''} placeholder="例如：校務會議" className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold" />
                                     </div>
                                     <div>
-                                        <label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">Cart</label>
+                                        <label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">場地</label>
                                         <select required name="cartName" defaultValue={lockModal.data?.cartName || ''} className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold">
                                             <option value="">-- 請選擇 --</option>
                                             {sortedAllCarts.map(([name]) => <option key={name} value={name}>{name}</option>)}
