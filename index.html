@@ -117,23 +117,25 @@
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'cartreserver-app';
 
         const initialData = {
-            "活動中心":         { type: "綜合場地",     location: "活動中心", capacity: 200, schedule: {}, notes: "可進行球類、舞蹈、集會等活動", order: 0, managerEmails: ["gao@nehs.hc.edu.tw"],    registrantEmails: [] },
-            "重量訓練室":       { type: "重訓室",       location: "學餐對面", capacity: 20,  schedule: {}, notes: "使用前請先閱讀器材安全須知",   order: 1, managerEmails: ["hanyun@nehs.hc.edu.tw"], registrantEmails: [] },
-            "地下多功能訓練室": { type: "多功能訓練室", location: "地下室",   capacity: 30,  schedule: {},                                          order: 2, managerEmails: ["hanyun@nehs.hc.edu.tw"], registrantEmails: [] },
+            "活動中心":         { type: "綜合場地",     location: "活動中心", capacity: 200, schedule: {}, notes: "可進行球類、舞蹈、集會等活動", order: 0, managerEmails: [], registrantEmails: [] },
+            "重量訓練室":       { type: "重訓室",       location: "學餐對面", capacity: 20,  schedule: {}, notes: "使用前請先閱讀器材安全須知",   order: 1, managerEmails: [], registrantEmails: [] },
+            "地下多功能訓練室": { type: "多功能訓練室", location: "地下室",   capacity: 30,  schedule: {},                                          order: 2, managerEmails: [], registrantEmails: [] },
         };
 
-        const initialUsers = {
-            "gao@nehs.hc.edu.tw":    { name: "Gao",     email: "gao@nehs.hc.edu.tw",    defaultClass: "中學部體育", customClass: "", role: "venue_manager" },
-            "hanyun@nehs.hc.edu.tw": { name: "Han Yun", email: "hanyun@nehs.hc.edu.tw", defaultClass: "中學部體育", customClass: "", role: "venue_manager" }
-        };
+        // 預設使用者（已淨空 — 過去 gao@nehs.hc.edu.tw / hanyun@nehs.hc.edu.tw 已被移除）
+        const initialUsers = {};
 
         // 預設場地審核者對應表（自動套用用）
         // 把場地名稱對應到「該場地的審核者 email 陣列」
         const DEFAULT_VENUE_MANAGERS = {
-            "活動中心":         ["gao@nehs.hc.edu.tw"],
-            "重量訓練室":       ["hanyun@nehs.hc.edu.tw"],
-            "地下多功能訓練室": ["hanyun@nehs.hc.edu.tw"]
+            "活動中心":         [],
+            "重量訓練室":       [],
+            "地下多功能訓練室": []
         };
+
+        // 一次性清理：這些 email 會在超級管理員登入時自動從 Firestore 移除
+        // （包括 users 表、各場地的 managerEmails / registrantEmails）
+        const USERS_TO_REMOVE = ['gao@nehs.hc.edu.tw', 'hanyun@nehs.hc.edu.tw'];
 
         // 🔧 部門權限對應表（預設值，作為 fallback）
         // 每個場地都有兩個角色清單：managerDepts (場地審查者) / registrantDepts (場地登記者)
@@ -526,6 +528,73 @@
                     }
                 })();
             }, [dbRefs, isAdmin]);
+
+            // 🔧 一次性清理：移除 USERS_TO_REMOVE 中列出的 email
+            // 從 users 表刪掉、並從每個 cart 的 managerEmails / registrantEmails 移除
+            // 只在超級管理員登入時跑一次
+            useEffect(() => {
+                if (!dbRefs || !isAdmin) return;
+                if (window.__usersToRemoveCleanedUp) return;
+                if (!Array.isArray(USERS_TO_REMOVE) || USERS_TO_REMOVE.length === 0) return;
+                // 等 cartData 載完才執行（不然 Object.entries 會空白跑過）
+                if (Object.keys(cartData).length === 0) return;
+                window.__usersToRemoveCleanedUp = true;
+
+                (async () => {
+                    const lowerSet = new Set(USERS_TO_REMOVE.map(e => (e || '').trim().toLowerCase()));
+                    const removed = { users: [], cartUpdates: [], failed: [] };
+
+                    try {
+                        // 1) 刪 users 文件（同時嘗試小寫與原始字串，以防舊資料是大小寫混雜）
+                        for (const email of lowerSet) {
+                            for (const docId of [email, email.toUpperCase(), USERS_TO_REMOVE.find(e => e.toLowerCase() === email)]) {
+                                if (!docId) continue;
+                                try {
+                                    const ref = dbRefs.getDocRef('users', docId);
+                                    const snap = await dbRefs.fb.getDoc(ref);
+                                    if (snap.exists()) {
+                                        await dbRefs.fb.deleteDoc(ref);
+                                        removed.users.push(docId);
+                                        console.log('[清理] 已刪除 user:', docId);
+                                    }
+                                } catch (e) { /* ignore */ }
+                            }
+                        }
+
+                        // 2) 從每個 cart 的 managerEmails / registrantEmails 移除
+                        for (const [cartName, data] of Object.entries(cartData)) {
+                            const before = {
+                                m: Array.isArray(data.managerEmails)    ? data.managerEmails    : [],
+                                r: Array.isArray(data.registrantEmails) ? data.registrantEmails : []
+                            };
+                            const after = {
+                                m: before.m.filter(e => !lowerSet.has((e || '').trim().toLowerCase())),
+                                r: before.r.filter(e => !lowerSet.has((e || '').trim().toLowerCase()))
+                            };
+                            if (after.m.length !== before.m.length || after.r.length !== before.r.length) {
+                                try {
+                                    await dbRefs.fb.updateDoc(dbRefs.getDocRef('carts', cartName), {
+                                        managerEmails: after.m,
+                                        registrantEmails: after.r
+                                    });
+                                    removed.cartUpdates.push(cartName);
+                                    console.log('[清理] 已從場地移除:', cartName);
+                                } catch (e) {
+                                    removed.failed.push(`${cartName}: ${e.message || e}`);
+                                }
+                            }
+                        }
+
+                        if (removed.users.length || removed.cartUpdates.length) {
+                            addLog("Cleanup Removed Users", "System",
+                                `刪除 user: [${removed.users.join(', ')}], 場地清理: [${removed.cartUpdates.join(', ')}]`
+                            );
+                        }
+                    } catch (err) {
+                        console.error('[清理] 失敗：', err);
+                    }
+                })();
+            }, [dbRefs, isAdmin, cartData]);
 
             // 🔧 FIX [效能]: Logs 改為「懶載入」— 只在管理員切到 logs tab 時才訂閱
             // 原本管理員一登入就 onSnapshot 訂閱 100 筆 logs（即使在看其他 tab），
@@ -3530,17 +3599,17 @@
                                             {Object.values(usersDB)
                                                 .filter(u => !editCartRegistrants.includes(u.email))
                                                 .filter(u => !editCartManagers.includes(u.email))
-                                                .filter(u => u.role === 'venue_registrant' || u.role === 'super_admin')
+                                                .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
                                                 .map(u => (
                                                     <option key={u.email} value={u.email}>
-                                                        {u.name} ({u.email}) — {ROLE_LABEL[u.role] || u.role}
+                                                        {u.name} ({u.email}) — {ROLE_LABEL[u.role] || u.role}{u.defaultClass ? ` · ${u.defaultClass}` : ''}
                                                     </option>
                                                 ))}
                                         </select>
                                         <p className="text-[11px] font-bold text-gray-400 mt-1.5 leading-snug">
                                             未選 = 任何已登入者都可預約此場地。<br/>
                                             選擇後，僅指定的登記者可預約此場地。<br/>
-                                            <span className="text-duo-greenDark">ℹ️ 名單只列出角色為「場地登記者」或「超級管理員」的使用者。</span>
+                                            <span className="text-duo-greenDark">ℹ️ 顯示所有 user，每筆右側顯示其角色與部門以利選擇。</span>
                                         </p>
                                     </div>
 
@@ -3580,17 +3649,17 @@
                                             {Object.values(usersDB)
                                                 .filter(u => !editCartManagers.includes(u.email))
                                                 .filter(u => !editCartRegistrants.includes(u.email))
-                                                .filter(u => u.role === 'venue_manager' || u.role === 'super_admin')
+                                                .sort((a, b) => (a.name || '').localeCompare(b.name || ''))
                                                 .map(u => (
                                                     <option key={u.email} value={u.email}>
-                                                        {u.name} ({u.email}) — {ROLE_LABEL[u.role] || u.role}
+                                                        {u.name} ({u.email}) — {ROLE_LABEL[u.role] || u.role}{u.defaultClass ? ` · ${u.defaultClass}` : ''}
                                                     </option>
                                                 ))}
                                         </select>
                                         <p className="text-[11px] font-bold text-gray-400 mt-1.5 leading-snug">
                                             未選 = 預約申請會寄給最高管理員審核。<br/>
                                             選擇後，預約申請會寄給最高管理員與所有指定審核者，任一人核准即可；通過後會 email 通知登記者與審核者。<br/>
-                                            <span className="text-duo-yellowDark">ℹ️ 名單只列出角色為「場地審核者」或「超級管理員」，且未在登記者名單中的使用者。</span>
+                                            <span className="text-duo-yellowDark">ℹ️ 顯示所有 user（已在登記者名單中的會自動排除）。</span>
                                         </p>
                                     </div>
                                     <div><label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">備註 (選填)</label><textarea name="notes" defaultValue={editCartModal.data?.notes || ''} placeholder="例如：使用前請閱讀器材安全須知" rows="2" className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold resize-none" /></div>
