@@ -137,6 +137,19 @@
         // （包括 users 表、各場地的 managerEmails / registrantEmails）
         const USERS_TO_REMOVE = ['gao@nehs.hc.edu.tw', 'hanyun@nehs.hc.edu.tw'];
 
+        // 🔧 批次重複預約預設清單
+        // dayIdx: 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
+        // periodIds: 對應 periods 陣列中的 id
+        const BATCH_BOOKING_PRESETS = [
+            { dayIdx: 0, periodIds: ['after'],   className: '國小部體育',     timeLabel: '16:10-18:30' },
+            { dayIdx: 1, periodIds: ['after'],   className: '教師羽球社團',   timeLabel: '16:10-20:00' },
+            { dayIdx: 2, periodIds: ['after'],   className: '雙語部體育',     timeLabel: '16:10-18:30' },
+            { dayIdx: 3, periodIds: ['after'],   className: '國小部體育',     timeLabel: '16:10-18:30' },
+            { dayIdx: 4, periodIds: ['after'],   className: '雙語部體育',     timeLabel: '16:10-18:30' },
+            { dayIdx: 5, periodIds: [2, 3, 4],   className: '雙語部體育',     timeLabel: '9:00-12:00（P2-P4）' },
+            { dayIdx: 5, periodIds: [5, 6, 7],   className: '國小部體育',     timeLabel: '13:00-16:00（P5-P7）' }
+        ];
+
         // 🔧 部門權限對應表（預設值，作為 fallback）
         // 每個場地都有兩個角色清單：managerDepts (場地審查者) / registrantDepts (場地登記者)
         // 套用時會依使用者的 defaultClass 分組，再把對應部門全部 user 寫進場地權限
@@ -294,6 +307,13 @@
             const [deptRulesModal, setDeptRulesModal] = useState({ isOpen: false });
             // 編輯時的暫存狀態（深拷貝自 deptVenueRules）
             const [tempDeptRules, setTempDeptRules] = useState(null);
+
+            // 🔧 批次重複預約表單
+            const [batchBookingForm, setBatchBookingForm] = useState({
+                cartName: '活動中心',
+                startDate: '2026-05-11',
+                endDate: '2026-06-30'
+            });
 
             const [isBatchMode, setIsBatchMode] = useState(false);
             const [batchSelection, setBatchSelection] = useState([]);
@@ -919,6 +939,124 @@
                     console.error(err);
                     showAlert("新增失敗，請稍後再試。\n" + (err.message || err));
                 }
+            };
+
+            // 🔧 計算批次預約的所有 slot
+            // 走訪每一週 + 每一個 preset，把每筆 (week, dayIdx) 換算成實際日期，
+            // 若該日期落在 [startDate, endDate] 範圍內就為每個 periodId 建一個 slot
+            const computeBatchBookingSlots = (form) => {
+                const slots = [];
+                if (!form.startDate || !form.endDate || !semesterConfig.startDate) return slots;
+
+                const [sy, sm, sd] = form.startDate.split('-').map(Number);
+                const [ey, em, ed] = form.endDate.split('-').map(Number);
+                const start = new Date(sy, sm - 1, sd); start.setHours(0, 0, 0, 0);
+                const end   = new Date(ey, em - 1, ed); end.setHours(0, 0, 0, 0);
+
+                const [ssy, ssm, ssd] = semesterConfig.startDate.split('-').map(Number);
+                const semStart = new Date(ssy, ssm - 1, ssd); semStart.setHours(0, 0, 0, 0);
+
+                for (let w = 1; w <= semesterConfig.totalWeeks; w++) {
+                    for (const preset of BATCH_BOOKING_PRESETS) {
+                        const dt = new Date(semStart);
+                        dt.setDate(dt.getDate() + (w - 1) * 7 + preset.dayIdx);
+                        if (dt >= start && dt <= end) {
+                            const dateStr = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+                            for (const pId of preset.periodIds) {
+                                slots.push({
+                                    slotId: `w${w}_d${preset.dayIdx}_p${pId}`,
+                                    week: w,
+                                    dayIdx: preset.dayIdx,
+                                    periodId: pId,
+                                    date: dateStr,
+                                    dayName: currentDays[preset.dayIdx],
+                                    periodName: (periods.find(p => String(p.id) === String(pId)) || {}).name || `P${pId}`,
+                                    className: preset.className,
+                                    timeLabel: preset.timeLabel
+                                });
+                            }
+                        }
+                    }
+                }
+                return slots;
+            };
+
+            // 🔧 執行批次建立預約：transaction 讀進場地 schedule，逐筆判斷是否衝突，最後一次 update
+            const handleExecuteBatchBooking = async () => {
+                if (!isAdmin) return showAlert("只有超級管理員可以執行此操作。");
+                if (!dbRefs) return showAlert("Firebase 尚未就緒。");
+                if (!batchBookingForm.cartName) return showAlert("請選擇場地。");
+
+                const slots = computeBatchBookingSlots(batchBookingForm);
+                if (slots.length === 0) {
+                    return showAlert("日期範圍內沒有任何要建立的時段（可能日期超出學期範圍）。");
+                }
+
+                showConfirm(
+                    `將為「${batchBookingForm.cartName}」批次建立 ${slots.length} 筆預約\n\n日期範圍：${batchBookingForm.startDate} ～ ${batchBookingForm.endDate}\n\n衝突的時段（已被預約／鎖定）會自動跳過。\n確定執行嗎？`,
+                    async () => {
+                        const cartRef = dbRefs.getDocRef('carts', batchBookingForm.cartName);
+                        try {
+                            const result = { added: 0, skippedExisting: 0, skippedLocked: 0, byDay: {} };
+
+                            await dbRefs.fb.runTransaction(dbRefs.db, async (transaction) => {
+                                const cartDoc = await transaction.get(cartRef);
+                                if (!cartDoc.exists()) throw "CART_NOT_FOUND";
+
+                                const data = cartDoc.data();
+                                const schedule = { ...(data.schedule || {}) };
+
+                                for (const s of slots) {
+                                    // 檢查 recurring lock
+                                    if (getLockForSlot(batchBookingForm.cartName, s.week, s.dayIdx, s.periodId)) {
+                                        result.skippedLocked++;
+                                        continue;
+                                    }
+                                    // 檢查已預約
+                                    if (schedule[s.slotId]) {
+                                        result.skippedExisting++;
+                                        continue;
+                                    }
+                                    schedule[s.slotId] = {
+                                        name:       s.className,
+                                        email:      SUPER_ADMIN_EMAIL,
+                                        ownerEmail: SUPER_ADMIN_EMAIL,
+                                        className:  s.className,
+                                        status:     'approved',
+                                        createdAt:  Date.now(),
+                                        batchTag:   'recurring-2026-05-11_06-30'
+                                    };
+                                    result.added++;
+                                    const key = `${s.dayName} ${s.className}`;
+                                    result.byDay[key] = (result.byDay[key] || 0) + 1;
+                                }
+
+                                transaction.update(cartRef, { schedule });
+                            });
+
+                            addLog("Batch Recurring Booking", batchBookingForm.cartName,
+                                `${batchBookingForm.startDate} ~ ${batchBookingForm.endDate} 共建立 ${result.added} 筆（跳過 ${result.skippedExisting} 筆既有 / ${result.skippedLocked} 筆鎖定）`
+                            );
+
+                            const breakdown = Object.entries(result.byDay)
+                                .map(([k, v]) => `   ${k}：${v} 筆`)
+                                .join('\n');
+                            showAlert(
+                                `✅ 批次預約完成！\n\n` +
+                                `場地：${batchBookingForm.cartName}\n` +
+                                `日期範圍：${batchBookingForm.startDate} ～ ${batchBookingForm.endDate}\n\n` +
+                                `📌 建立：${result.added} 筆\n` +
+                                (result.skippedExisting > 0 ? `⏭ 跳過已預約：${result.skippedExisting} 筆\n` : '') +
+                                (result.skippedLocked > 0 ? `🔒 跳過已鎖定：${result.skippedLocked} 筆\n` : '') +
+                                `\n依「日期+類別」拆分：\n${breakdown}`
+                            );
+                        } catch (err) {
+                            console.error('批次預約錯誤', err);
+                            if (err === "CART_NOT_FOUND") showAlert(`找不到場地「${batchBookingForm.cartName}」，請先確認場地名稱正確。`);
+                            else showAlert("批次建立失敗：" + (err.message || err));
+                        }
+                    }
+                );
             };
 
             // 🔧 開啟部門權限規則編輯器（深拷貝目前規則作為暫存）
