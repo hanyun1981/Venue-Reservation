@@ -722,6 +722,16 @@
                 return `${date.getMonth() + 1}/${date.getDate()}`;
             };
 
+            // 回傳 (週次, 星期idx) 對應的完整 yyyy-mm-dd 字串（給 date input 預設值用）
+            const getDateStrForWeekDay = (weekNum, dayIdx) => {
+                if (!semesterConfig.startDate) return "";
+                const [year, month, day] = semesterConfig.startDate.split('-').map(Number);
+                const date = new Date(year, month - 1, day);
+                if (isNaN(date.getTime())) return "";
+                date.setDate(date.getDate() + (Number(weekNum) - 1) * 7 + Number(dayIdx));
+                return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+            };
+
             // ============================================================
             // 🔧 多筆競爭預約：一個 slot 可同時存在多筆 booking（一筆 approved + N 筆 pending）
             // 資料結構：schedule[slotId] 可以是
@@ -1347,21 +1357,41 @@
                 ) || null;
             };
 
+            // 把 yyyy-mm-dd 字串轉為「以 semesterConfig.startDate 為基準的週數」
+            const dateStrToWeek = (dateStr) => {
+                if (!dateStr || !semesterConfig.startDate) return 1;
+                const [y, m, d] = dateStr.split('-').map(Number);
+                const dt = new Date(y, m - 1, d); dt.setHours(0, 0, 0, 0);
+                const [sy, sm, sd] = semesterConfig.startDate.split('-').map(Number);
+                const start = new Date(sy, sm - 1, sd); start.setHours(0, 0, 0, 0);
+                const diffDays = Math.floor((dt.getTime() - start.getTime()) / 86400000);
+                return Math.floor(diffDays / 7) + 1;
+            };
+
             const saveLock = async (e) => {
                 e.preventDefault();
                 const formData = new FormData(e.target);
+                const startDateStr = formData.get('startDate');
+                const endDateStr = formData.get('endDate');
+                const dayIdx = Number(formData.get('dayIdx'));
+                // 從起始日期推算 startWeek；從起始-結束日期區間推算持續週數
+                const startWeek = dateStrToWeek(startDateStr);
+                const endWeek = dateStrToWeek(endDateStr);
+                const weeks = Math.max(1, endWeek - startWeek + 1);
+
                 const lockData = {
                     id: lockModal.lockId || `lock_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
                     name: formData.get('name').trim() || 'Locked',
                     cartName: formData.get('cartName'),
-                    dayIdx: Number(formData.get('dayIdx')),
+                    dayIdx,
                     periodId: formData.get('periodId'),
-                    startWeek: Number(formData.get('startWeek')),
-                    weeks: Number(formData.get('weeks'))
+                    startWeek,
+                    weeks
                 };
 
                 if (!lockData.cartName) { showAlert("請選擇一個場地。"); return; }
-                if (lockData.weeks < 1) { showAlert("持續週數必須至少 1 週。"); return; }
+                if (!startDateStr || !endDateStr) { showAlert("請填寫起始與結束日期。"); return; }
+                if (endWeek < startWeek) { showAlert("結束日期不可早於起始日期。"); return; }
 
                 try {
                     const newLocks = lockModal.lockId
@@ -1388,7 +1418,7 @@
                         if (changed) transaction.update(cartRef, { schedule });
                     });
 
-                    addLog(lockModal.lockId ? "Edit Lock" : "Add Lock", lockData.cartName, `${lockData.name} · Wk${lockData.startWeek}-${lockData.startWeek + lockData.weeks - 1} · ${currentDays[lockData.dayIdx] || `Day${lockData.dayIdx}`} P${lockData.periodId}`);
+                    addLog(lockModal.lockId ? "Edit Lock" : "Add Lock", lockData.cartName, `${lockData.name} · ${getDateForDayIdx(lockData.startWeek, lockData.dayIdx)} - ${getDateForDayIdx(lockData.startWeek + lockData.weeks - 1, lockData.dayIdx)} · ${currentDays[lockData.dayIdx] || `Day${lockData.dayIdx}`} P${lockData.periodId}`);
                     setLockModal({ isOpen: false, lockId: null, data: null });
                 } catch (err) {
                     console.error("Save lock error:", err);
@@ -1403,7 +1433,7 @@
                     try {
                         const newLocks = recurringLocks.filter(l => l.id !== lockId);
                         await dbRefs.fb.setDoc(dbRefs.getDocRef('settings', 'main'), { recurringLocks: newLocks }, { merge: true });
-                        addLog("Delete Lock", lock.cartName, `${lock.name} · Wk${lock.startWeek}-${lock.startWeek + lock.weeks - 1}`);
+                        addLog("Delete Lock", lock.cartName, `${lock.name} · ${getDateForDayIdx(lock.startWeek, lock.dayIdx)} - ${getDateForDayIdx(lock.startWeek + lock.weeks - 1, lock.dayIdx)}`);
                     } catch (err) {
                         console.error("Delete lock error:", err);
                         showAlert("刪除鎖定失敗，請稍後再試。");
@@ -1747,8 +1777,8 @@
 
                     const lockTag = hasAnyLockedSlot ? ' [conflicts with lock]' : '';
                     const details = slotsToBook.length === 1
-                        ? `Week ${selectedWeek} ${currentDays[slotsToBook[0].dayIdx]} P${slotsToBook[0].periodId}${getSlotAreaLabel(slotsToBook[0].areaId) ? ` ${getSlotAreaLabel(slotsToBook[0].areaId)}` : ''} (${finalClass}) [${effectiveInitialStatus}]${lockTag}`
-                        : `Batch booked ${slotsToBook.length} slots for Week ${selectedWeek} (${finalClass}) [${effectiveInitialStatus}]${lockTag}`;
+                        ? `${getDateForDayIdx(selectedWeek, slotsToBook[0].dayIdx)} ${currentDays[slotsToBook[0].dayIdx]} P${slotsToBook[0].periodId}${getSlotAreaLabel(slotsToBook[0].areaId) ? ` ${getSlotAreaLabel(slotsToBook[0].areaId)}` : ''} (${finalClass}) [${effectiveInitialStatus}]${lockTag}`
+                        : `Batch booked ${slotsToBook.length} slots starting ${getDateForDayIdx(selectedWeek, slotsToBook[0].dayIdx)} (${finalClass}) [${effectiveInitialStatus}]${lockTag}`;
 
                     addLog("Add Booking", selectedCart, details);
                     setBookingModal({ isOpen: false, dayIdx: null, periodId: null, existingBooking: null, isEditing: false, isBatch: false });
@@ -2085,7 +2115,7 @@
 
                     const actionName = isAdmin ? "Force Cancel" : "Cancel Booking";
                     const areaLabel = getSlotAreaLabel(bookingModal.areaId || bookingModal.existingBooking?.areaId);
-                    addLog(actionName, selectedCart, `Week ${selectedWeek} ${currentDays[bookingModal.dayIdx]} P${bookingModal.periodId}${areaLabel ? ` ${areaLabel}` : ''} (${cancelledName})`);
+                    addLog(actionName, selectedCart, `${getDateForDayIdx(selectedWeek, bookingModal.dayIdx)} ${currentDays[bookingModal.dayIdx]} P${bookingModal.periodId}${areaLabel ? ` ${areaLabel}` : ''} (${cancelledName})`);
                 } catch (error) {
                     if (error === "ALREADY_CANCELLED") showAlert("這筆預約已經被取消了。");
                     else if (error === "NOT_OWNER") showAlert("你只能取消自己的預約。");
@@ -2142,7 +2172,7 @@
                         transaction.update(cartRef, { schedule: currentSchedule });
                     });
 
-                    addLog("Admin Edit", selectedCart, `Week ${selectedWeek} ${currentDays[bookingModal.dayIdx]} P${bookingModal.periodId} (Updated: ${editBookForm.name})`);
+                    addLog("Admin Edit", selectedCart, `${getDateForDayIdx(selectedWeek, bookingModal.dayIdx)} ${currentDays[bookingModal.dayIdx]} P${bookingModal.periodId} (Updated: ${editBookForm.name})`);
                     setBookingModal({ isOpen: false, dayIdx: null, periodId: null, existingBooking: null, isEditing: false, isBatch: false });
                 } catch (error) {
                     if (error === "SLOT_NOT_FOUND") showAlert("這筆預約似乎已經被使用者手動取消了！請重新確認設備狀態。");
@@ -2505,7 +2535,7 @@
                                         ><i className="fa-solid fa-chevron-right"></i></button>
                                     </div>
                                     <span className="text-xs font-bold text-gray-500 bg-white border-2 border-duo-grayBorder rounded-lg px-3 py-1.5">
-                                        {currentDays[selectedDayIdx]} · 該週 ({getWeekDateRange(selectedWeek, true)})
+                                        {currentDays[selectedDayIdx]}（{getWeekDateRange(selectedWeek, true)}）
                                     </span>
                                 </div>
                                 <div className="text-xs font-extrabold text-duo-text/60 uppercase tracking-wider">
@@ -2563,7 +2593,7 @@
                                                         </div>
                                                         <div className="text-sm font-bold text-gray-500 mb-3 leading-relaxed">
                                                             <div><i className="fa-solid fa-user mr-2 text-gray-400"></i>{p.info.name} <span className="text-xs text-gray-400">({p.info.email})</span></div>
-                                                            <div><i className="fa-regular fa-calendar mr-2 text-gray-400"></i>第 {p.week} 週 {currentDays[p.dayIdx]} {periodInfo ? periodInfo.name : `P${p.periodId}`}{p.areaLabel ? ` · ${p.areaLabel}` : ''}</div>
+                                                            <div><i className="fa-regular fa-calendar mr-2 text-gray-400"></i>{getDateForDayIdx(p.week, p.dayIdx)}（{currentDays[p.dayIdx]}）{periodInfo ? periodInfo.name : `P${p.periodId}`}{p.areaLabel ? ` · ${p.areaLabel}` : ''}</div>
                                                             {competing && (
                                                                 <div className="text-[11px] mt-1 text-duo-redDark">
                                                                     <i className="fa-solid fa-circle-exclamation mr-1"></i>
@@ -2662,8 +2692,8 @@
                                                                 <div className="pl-2 space-y-2 mb-6">
                                                                     <div className="flex items-center text-sm font-bold text-gray-500">
                                                                         <div className="w-6"><i className="fa-regular fa-calendar text-gray-400"></i></div>
-                                                                        <span className="bg-gray-100 px-2 py-0.5 rounded-md mr-2 text-duo-text">Wk {b.week}</span> 
-                                                                        {currentDays[b.dayIdx]} ({getDateForDayIdx(b.week, b.dayIdx)})
+                                                                        <span className="bg-gray-100 px-2 py-0.5 rounded-md mr-2 text-duo-text">{getDateForDayIdx(b.week, b.dayIdx)}</span>
+                                                                        {currentDays[b.dayIdx]}
                                                                     </div>
                                                                     <div className="flex items-center text-sm font-bold text-gray-500">
                                                                         <div className="w-6"><i className="fa-regular fa-clock text-gray-400"></i></div>
@@ -2696,7 +2726,7 @@
                                     ) : (
                                         <div className="bg-white rounded-[2rem] border-2 border-duo-grayBorder shadow-duo-card overflow-hidden">
                                             <div className="overflow-x-auto p-4 custom-scrollbar">
-                                                <div className="mb-4 text-center font-extrabold text-duo-text text-xl">{selectedDate} 所在週的排程（{getWeekDateRange(selectedWeek, true)}）</div>
+                                                <div className="mb-4 text-center font-extrabold text-duo-text text-xl">{getWeekDateRange(selectedWeek, true)} 排程</div>
                                                 <table className="w-full min-w-[700px] border-separate border-spacing-2">
                                                     <thead>
                                                         <tr>
@@ -3637,6 +3667,8 @@
                                                                     const dayName = currentDays[lock.dayIdx] || `Day ${lock.dayIdx}`;
                                                                     const periodInfo = periods.find(p => String(p.id) === String(lock.periodId));
                                                                     const endWeek = Number(lock.startWeek) + Number(lock.weeks) - 1;
+                                                                    const startDateStr = getDateForDayIdx(lock.startWeek, lock.dayIdx);
+                                                                    const endDateStr = getDateForDayIdx(endWeek, lock.dayIdx);
                                                                     return (
                                                                         <div key={lock.id} className="bg-white border-2 border-duo-grayBorder rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3">
                                                                             <div className="flex-1 min-w-0">
@@ -3646,7 +3678,7 @@
                                                                                 </div>
                                                                                 <div className="text-xs font-bold text-gray-500">
                                                                                     <span className="bg-blue-50 text-duo-blue px-2 py-0.5 rounded-md mr-2">{lock.cartName}</span>
-                                                                                    {dayName} · {periodInfo ? periodInfo.name : `P${lock.periodId}`} · 第 {lock.startWeek}-{endWeek} 週（{lock.weeks} 週）
+                                                                                    每{dayName} · {periodInfo ? periodInfo.name : `P${lock.periodId}`} · {startDateStr} - {endDateStr}
                                                                                 </div>
                                                                             </div>
                                                                             <div className="flex gap-2">
@@ -3688,7 +3720,7 @@
                                 </div>
                                 <div className="bg-white rounded-[2rem] border-2 border-duo-grayBorder shadow-duo-card p-8">
                                     <h2 className="text-3xl font-extrabold text-duo-text mb-2"><i className="fa-solid fa-print text-duo-blue mr-3"></i>Print Records</h2>
-                                    <p className="font-bold text-gray-500 mb-8 border-b-2 border-duo-grayBorder pb-4">列印週：<span className="text-duo-blue font-extrabold px-2 py-1 bg-blue-50 rounded-lg">{selectedDate}（所在週 {getWeekDateRange(selectedWeek, true)}）</span></p>
+                                    <p className="font-bold text-gray-500 mb-8 border-b-2 border-duo-grayBorder pb-4">列印日期：<span className="text-duo-blue font-extrabold px-2 py-1 bg-blue-50 rounded-lg">{getWeekDateRange(selectedWeek, true)}</span></p>
                                     
                                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4 mb-8">
                                         {sortedAllCarts.map(([name, data]) => {
@@ -3717,7 +3749,7 @@
         <div key={cartName} className="page-break w-full">
             <div className="text-center mb-2">
                 <h2 className="text-2xl font-bold">{cartName} 預約清單</h2>
-                <p className="text-sm mt-1">所選日期 {selectedDate} 所在週 ({getWeekDateRange(selectedWeek, true)})</p>
+                <p className="text-sm mt-1">日期區間：{getWeekDateRange(selectedWeek, true)}</p>
             </div>
             
             <table className="w-full text-xs">
@@ -3848,8 +3880,8 @@
                                         {selectedCart} <br/>
                                         <span className="text-xs text-duo-blue/70">
                                             {bookingModal.isBatch
-                                                ? `Wk ${selectedWeek} • Booking ${batchSelection.length} Slots`
-                                                : `Wk ${selectedWeek} • ${currentDays[bookingModal.dayIdx]} • P${bookingModal.periodId}${getSlotAreaLabel(bookingModal.areaId || bookingModal.existingBooking?.areaId) ? ` • ${getSlotAreaLabel(bookingModal.areaId || bookingModal.existingBooking?.areaId)}` : ''}`
+                                                ? `批次選 ${batchSelection.length} 個時段`
+                                                : `${getDateForDayIdx(selectedWeek, bookingModal.dayIdx)}（${currentDays[bookingModal.dayIdx]}）• P${bookingModal.periodId}${getSlotAreaLabel(bookingModal.areaId || bookingModal.existingBooking?.areaId) ? ` • ${getSlotAreaLabel(bookingModal.areaId || bookingModal.existingBooking?.areaId)}` : ''}`
                                             }
                                         </span>
                                     </div>
@@ -4297,14 +4329,23 @@
                                     </div>
                                     <div className="grid grid-cols-2 gap-4">
                                         <div>
-                                            <label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">起始週</label>
-                                            <input required type="number" name="startWeek" min="1" max={semesterConfig.totalWeeks} defaultValue={lockModal.data?.startWeek || currentRealWeek || 1} className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold" />
+                                            <label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">起始日期</label>
+                                            <input required type="date" name="startDate"
+                                                defaultValue={lockModal.data?.startWeek
+                                                    ? getDateStrForWeekDay(lockModal.data.startWeek, lockModal.data.dayIdx ?? 0)
+                                                    : selectedDate}
+                                                className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold" />
                                         </div>
                                         <div>
-                                            <label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">持續幾週</label>
-                                            <input required type="number" name="weeks" min="1" max={semesterConfig.totalWeeks} defaultValue={lockModal.data?.weeks || 1} className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold" />
+                                            <label className="block text-xs font-extrabold text-gray-400 uppercase tracking-wider mb-1">結束日期</label>
+                                            <input required type="date" name="endDate"
+                                                defaultValue={lockModal.data?.startWeek
+                                                    ? getDateStrForWeekDay(Number(lockModal.data.startWeek) + Number(lockModal.data.weeks || 1) - 1, lockModal.data.dayIdx ?? 0)
+                                                    : selectedDate}
+                                                className="w-full px-4 py-3 bg-white border-2 border-duo-grayBorder rounded-xl focus:border-duo-blue outline-none font-bold" />
                                         </div>
                                     </div>
+                                    <p className="text-[11px] font-bold text-gray-400 -mt-2">ℹ️ 鎖定會在「起始～結束」期間，每個指定星期的指定節次重複套用。</p>
                                     <div className="bg-red-50 border-2 border-red-100 rounded-xl p-3 text-xs font-bold text-duo-red">
                                         <i className="fa-solid fa-triangle-exclamation mr-1"></i> 儲存後，該時段內現有的預約將被覆蓋移除。
                                     </div>
